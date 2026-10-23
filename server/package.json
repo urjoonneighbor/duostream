@@ -1,0 +1,18 @@
+{
+  "name": "duostream-signaling",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Минимальный WebSocket-сервер сигнализации DuoStream: только SDP и ICE, медиа через него не идёт",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+client/dist/
+client/test-output/
+# Копируется из node_modules при npm install (scripts/copy-ort.mjs)
+client/src/renderer/vendor/
+# Собственный захват: собирается npm run build:native
+client/native/bin/
+client/native/capture/bin/
+client/native/capture/obj/
+*.log

@@ -1,0 +1,49 @@
+{
+  "_help": "Описание всех полей: docs/05-config.md. Файл можно править вручную (при закрытом приложении) или через окно «Настройки».",
+  "signaling": {
+    "url": "ws://127.0.0.1:8787",
+    "password": "",
+    "role": "streamer",
+    "displayName": ""
+  },
+  "video": {
+    "width": 2560,
+    "height": 1440,
+    "frameRate": 120,
+    "bitrateKbps": 20000,
+    "minBitrateKbps": 8000,
+    "codecs": ["AV1", "H264", "VP9"],
+    "preferHardware": true,
+    "contentHint": "motion",
+    "degradationPreference": "maintain-framerate",
+    "showPreview": true,
+    "captureEngine": "auto"
+  },
+  "audio": {
+    "micDeviceId": "default",
+    "outputDeviceId": "default",
+    "noiseSuppression": true,
+    "echoCancellation": true,
+    "autoGainControl": true,
+    "voiceBitrateKbps": 64,
+    "captureSystemAudio": false,
+    "systemAudioBitrateKbps": 160
+  },
+  "network": {
+    "iceServers": [
+      { "urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }
+    ],
+    "turn": {
+      "enabled": false,
+      "urls": "turn:203.0.113.10:3478",
+      "username": "",
+      "credential": ""
+    },
+    "udpPortRange": { "min": 50000, "max": 50019 },
+    "publicIp": "",
+    "forceRelay": false
+  },
+  "playback": {
+    "jitterBufferTargetMs": 0
+  }
+}

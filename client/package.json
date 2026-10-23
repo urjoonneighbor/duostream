@@ -1,0 +1,56 @@
+{
+  "name": "duostream",
+  "productName": "DuoStream",
+  "version": "1.0.0",
+  "private": true,
+  "description": "P2P-стрим экрана и голосовой чат на двоих: WebRTC, AV1/NVENC, шумодав на ONNX Runtime",
+  "main": "src/main/main.js",
+  "scripts": {
+    "postinstall": "node scripts/copy-ort.mjs && node scripts/build-native.mjs --optional",
+    "start": "electron .",
+    "start:viewer": "electron . --profile=viewer",
+    "build:native": "node scripts/build-native.mjs",
+    "fetch-models": "node scripts/fetch-models.mjs",
+    "test:denoiser": "node scripts/test-denoiser.mjs",
+    "dist": "npm run build:native && electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "^44.9.3",
+    "electron-builder": "^26.15.3",
+    "onnxruntime-web": "^1.30.0"
+  },
+  "allowScripts": {
+    "electron": true
+  },
+  "build": {
+    "appId": "local.duostream.app",
+    "productName": "DuoStream",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "config/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native/bin",
+        "to": "native",
+        "filter": [
+          "duostream-capture.exe"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

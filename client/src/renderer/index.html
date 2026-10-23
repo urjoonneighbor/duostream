@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self' ws: wss:; worker-src 'self'"
+    />
+    <title>DuoStream</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="js/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand"><span class="logo" aria-hidden="true"></span>DuoStream</div>
+      <div class="status" id="status" data-tone="idle">
+        <span class="dot"></span><span id="statusText">Не подключено</span>
+      </div>
+      <div class="spacer"></div>
+      <span class="peer" id="peerName"></span>
+      <button class="icon-btn" id="btnSettings" title="Настройки" data-icon="sliders"></button>
+    </header>
+
+    <main class="stage" id="stage">
+      <video id="video" autoplay playsinline muted></video>
+      <div class="badge" id="previewBadge" hidden>Предпросмотр · зритель видит то же самое</div>
+
+      <div class="overlay" id="overlay">
+        <form class="card" id="connectCard" autocomplete="off">
+          <h1>Подключение</h1>
+          <div class="segmented" role="radiogroup" aria-label="Роль">
+            <label><input type="radio" name="role" value="streamer" /><span>Я стример</span></label>
+            <label><input type="radio" name="role" value="viewer" /><span>Я зритель</span></label>
+          </div>
+          <label class="field">
+            <span>Сигнальный сервер</span>
+            <input id="fUrl" placeholder="ws://203.0.113.10:8787" required spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>Пароль комнаты</span>
+            <input id="fPassword" type="password" required minlength="8" />
+          </label>
+          <label class="field">
+            <span>Имя</span>
+            <input id="fName" maxlength="64" placeholder="Как вас показать собеседнику" />
+          </label>
+          <button class="primary wide" id="btnConnect" type="submit">Подключиться</button>
+          <p class="hint" id="connectHint"></p>
+        </form>
+
+        <div class="message" id="stageMessage" hidden>
+          <div class="spinner" id="stageSpinner"></div>
+          <p class="title" id="stageTitle"></p>
+          <p class="sub" id="stageSub"></p>
+        </div>
+      </div>
+
+      <aside class="hud" id="hud" hidden>
+        <h3>Качество соединения</h3>
+        <dl id="hudList"></dl>
+      </aside>
+    </main>
+
+    <footer class="controls">
+      <div class="group">
+        <button class="primary" id="btnStream" hidden><i data-icon="screen"></i><span>Начать стрим</span></button>
+        <button id="btnDisconnect" hidden><i data-icon="leave"></i><span>Отключиться</span></button>
+      </div>
+      <div class="group">
+        <button class="toggle" id="btnMic" title="Микрофон (Ctrl+M)" disabled>
+          <i data-icon="mic"></i>
+          <span class="meter"><i id="micLevel"></i></span>
+        </button>
+        <button class="toggle" id="btnDenoise" title="Шумоподавление (DTLN, ONNX Runtime)" disabled>
+          <i data-icon="wave"></i><span id="denoiseText">Шумодав</span>
+        </button>
+        <label class="volume" title="Громкость собеседника">
+          <span>Голос</span><input type="range" id="voiceVolume" min="0" max="100" value="100" />
+        </label>
+        <label class="volume" id="streamVolumeWrap" title="Громкость звука трансляции" hidden>
+          <span>Стрим</span><input type="range" id="streamVolume" min="0" max="100" value="80" />
+        </label>
+      </div>
+      <div class="group right">
+        <button class="quality" id="btnQuality" data-quality="unknown" title="Подробная статистика">
+          <span class="bars"><i></i><i></i><i></i></span><span id="qualityText">Нет соединения</span>
+        </button>
+        <button class="icon-btn" id="btnFullscreen" title="Во весь экран (двойной клик по видео)" data-icon="fullscreen"></button>
+      </div>
+    </footer>
+
+    <audio id="voiceAudio" autoplay></audio>
+    <audio id="systemAudio" autoplay></audio>
+
+    <!-- Выбор экрана или окна -->
+    <dialog id="pickerDialog" class="picker">
+      <header>
+        <h2>Что показать зрителю</h2>
+        <div class="tabs" id="pickerTabs">
+          <button type="button" data-tab="screen" class="active">Экраны</button>
+          <button type="button" data-tab="window">Окна</button>
+        </div>
+        <button type="button" class="ghost" id="pickerRefresh">Обновить</button>
+      </header>
+      <div class="grid" id="pickerGrid"></div>
+      <footer>
+        <label class="check"><input type="checkbox" id="pickerAudio" /><span>Передавать системный звук</span></label>
+        <span class="hint" id="pickerInfo"></span>
+        <button type="button" id="pickerCancel">Отмена</button>
+      </footer>
+    </dialog>
+
+    <!-- Настройки -->
+    <dialog id="settingsDialog" class="settings">
+      <form id="settingsForm" method="dialog">
+        <header>
+          <h2>Настройки</h2>
+          <div class="tabs" id="settingsTabs">
+            <button type="button" data-tab="video" class="active">Видео</button>
+            <button type="button" data-tab="audio">Звук</button>
+            <button type="button" data-tab="network">Сеть</button>
+            <button type="button" data-tab="diag">Диагностика</button>
+          </div>
+        </header>
+
+        <section data-panel="video">
+          <div class="row">
+            <label class="field">
+              <span>Разрешение</span>
+              <select id="sResolution">
+                <option value="2560x1440">2560 × 1440 (QHD)</option>
+                <option value="1920x1080">1920 × 1080 (Full HD)</option>
+                <option value="3840x2160">3840 × 2160 (4K)</option>
+                <option value="0x0">Как у источника</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Частота кадров</span>
+              <select id="sFps">
+                <option value="120">120 FPS</option>
+                <option value="90">90 FPS</option>
+                <option value="60">60 FPS</option>
+                <option value="30">30 FPS</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label class="field">
+              <span>Битрейт, кбит/с (максимум)</span>
+              <input id="sBitrate" type="number" min="500" max="200000" step="500" />
+            </label>
+            <label class="field">
+              <span>Минимальный битрейт, кбит/с</span>
+              <input id="sMinBitrate" type="number" min="0" max="200000" step="500" />
+            </label>
+          </div>
+          <div class="row">
+            <label class="field">
+              <span>Кодеки по приоритету</span>
+              <select id="sCodecs">
+                <option value="AV1,H264,VP9">AV1 → H.264 → VP9</option>
+                <option value="AV1,VP9,H264">AV1 → VP9 → H.264</option>
+                <option value="H264,AV1,VP9">H.264 → AV1 → VP9</option>
+                <option value="VP9,AV1,H264">VP9 → AV1 → H.264</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Тип контента</span>
+              <select id="sContentHint">
+                <option value="motion">Игра / видео (плавность)</option>
+                <option value="detail">Рабочий стол / текст (чёткость)</option>
+              </select>
+            </label>
+          </div>
+          <div class="row">
+            <label class="field">
+              <span>Способ захвата</span>
+              <select id="sCaptureEngine">
+                <option value="auto">Собственный (до 120 FPS), при сбое — Chromium</option>
+                <option value="chromium">Только Chromium (до ~60 FPS на Windows 11 24H2+)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>При нехватке канала</span>
+              <select id="sDegradation">
+                <option value="maintain-framerate">Держать FPS, снижать разрешение</option>
+                <option value="maintain-resolution">Держать разрешение, снижать FPS</option>
+                <option value="balanced">Сбалансированно</option>
+              </select>
+            </label>
+          </div>
+          <label class="check"><input type="checkbox" id="sPreferHw" /><span>Аппаратный энкодер в приоритете (автопереключение кодека, если кодирование ушло на CPU)</span></label>
+          <label class="check"><input type="checkbox" id="sPreview" /><span>Показывать предпросмотр своей трансляции</span></label>
+        </section>
+
+        <section data-panel="audio" hidden>
+          <div class="row">
+            <label class="field"><span>Микрофон</span><select id="sMic"></select></label>
+            <label class="field"><span>Устройство вывода звука</span><select id="sOutput"></select></label>
+          </div>
+          <label class="check"><input type="checkbox" id="sDenoise" /><span>Шумоподавление (DTLN на ONNX Runtime, локально)</span></label>
+          <label class="check"><input type="checkbox" id="sEcho" /><span>Эхоподавление (выключите, если вы в наушниках)</span></label>
+          <label class="check"><input type="checkbox" id="sAgc" /><span>Автоматическая регулировка громкости микрофона</span></label>
+          <div class="row">
+            <label class="field">
+              <span>Битрейт голоса (Opus), кбит/с</span>
+              <input id="sVoiceBitrate" type="number" min="16" max="256" step="8" />
+            </label>
+            <label class="field">
+              <span>Битрейт системного звука, кбит/с</span>
+              <input id="sSystemBitrate" type="number" min="32" max="510" step="16" />
+            </label>
+          </div>
+          <label class="check"><input type="checkbox" id="sSystemAudio" /><span>Стример: по умолчанию передавать системный звук</span></label>
+          <p class="hint">
+            Системный звук захватывается целиком с устройства вывода по умолчанию. Чтобы зритель не слышал
+            сам себя, выберите для голоса собеседника другое устройство вывода (например, гарнитуру).
+          </p>
+        </section>
+
+        <section data-panel="network" hidden>
+          <label class="field">
+            <span>STUN-серверы (по одному в строке)</span>
+            <textarea id="sStun" rows="3" spellcheck="false"></textarea>
+          </label>
+          <div class="row">
+            <label class="field"><span>Диапазон UDP-портов WebRTC: от</span><input id="sPortMin" type="number" min="0" max="65535" /></label>
+            <label class="field"><span>до</span><input id="sPortMax" type="number" min="0" max="65535" /></label>
+          </div>
+          <label class="field">
+            <span>Белый IP стримера (необязательно — определяется через STUN)</span>
+            <input id="sPublicIp" placeholder="203.0.113.10" spellcheck="false" />
+          </label>
+          <fieldset>
+            <legend><label class="check"><input type="checkbox" id="sTurnEnabled" /><span>Резервный TURN-сервер</span></label></legend>
+            <label class="field"><span>Адрес</span><input id="sTurnUrl" placeholder="turn:203.0.113.10:3478" spellcheck="false" /></label>
+            <div class="row">
+              <label class="field"><span>Логин</span><input id="sTurnUser" spellcheck="false" /></label>
+              <label class="field"><span>Пароль</span><input id="sTurnPass" type="password" /></label>
+            </div>
+            <label class="check"><input type="checkbox" id="sForceRelay" /><span>Только через TURN (для проверки релея)</span></label>
+          </fieldset>
+          <label class="field">
+            <span>Целевой джиттер-буфер зрителя, мс (0 — автоматически)</span>
+            <input id="sJitter" type="number" min="0" max="4000" step="10" />
+          </label>
+          <p class="hint">Сетевые настройки применяются при следующем подключении.</p>
+        </section>
+
+        <section data-panel="diag" hidden>
+          <dl class="diag" id="diagList"></dl>
+        </section>
+
+        <footer>
+          <span class="path" id="configPath"></span>
+          <button type="button" class="ghost" id="btnOpenConfig">Открыть файл</button>
+          <div class="spacer"></div>
+          <button type="button" id="btnSettingsCancel">Отмена</button>
+          <button type="submit" class="primary" id="btnSettingsSave">Сохранить</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+  </body>
+</html>
