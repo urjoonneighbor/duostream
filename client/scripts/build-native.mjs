@@ -29,6 +29,28 @@ if (dotnet.status !== 0 || !/^10\./m.test(dotnet.stdout)) {
   skip('не найден .NET SDK 10 (https://dotnet.microsoft.com/download), собственный захват не собран');
 }
 
+/**
+ * Папка кэша пакетов NuGet (globalPackagesFolder в настройках ПК) может указывать на несуществующий
+ * диск — тогда восстановление падает. В таком случае кладём пакеты в native/.nuget-packages.
+ */
+function packagesEnv() {
+  if (process.env.NUGET_PACKAGES) return {};
+  const locals = spawnSync('dotnet', ['nuget', 'locals', 'global-packages', '--list'], {
+    encoding: 'utf8',
+    cwd: path.dirname(project), // чтобы учитывался и nuget.config проекта
+  });
+  const folder = /global-packages:\s*(.+)/i.exec(locals.stdout ?? '')?.[1].trim();
+  if (!folder) return {};
+  try {
+    fs.mkdirSync(folder, { recursive: true });
+    return {};
+  } catch {
+    const local = path.join(root, 'native', '.nuget-packages');
+    console.warn(`[build-native] папка пакетов NuGet ${folder} недоступна — использую ${path.relative(root, local)}`);
+    return { NUGET_PACKAGES: local };
+  }
+}
+
 console.log('[build-native] dotnet publish …');
 const result = spawnSync(
   'dotnet',
@@ -43,7 +65,7 @@ const result = spawnSync(
     '-o', output,
     '-nologo',
   ],
-  { stdio: 'inherit' },
+  { stdio: 'inherit', env: { ...process.env, ...packagesEnv() } },
 );
 if (result.status !== 0) skip('сборка собственного захвата не удалась (см. вывод выше)');
 

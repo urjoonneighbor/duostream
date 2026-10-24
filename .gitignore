@@ -7,4 +7,5 @@ client/src/renderer/vendor/
 client/native/bin/
 client/native/capture/bin/
 client/native/capture/obj/
+client/native/.nuget-packages/
 *.log
