@@ -293,6 +293,25 @@ textarea {
   margin: 0;
   line-height: 1.5;
 }
+.share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 16px;
+  color: var(--muted);
+}
+.share code {
+  font-family: Consolas, monospace;
+  font-size: 15px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 6px 10px;
+  user-select: all;
+}
 .spinner {
   width: 34px;
   height: 34px;

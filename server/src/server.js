@@ -23,7 +23,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { WebSocketServer } from 'ws';
 import { deriveKey, hmacHex, safeEqualHex, authMessage } from './crypto.js';
 
 export const PROTOCOL_VERSION = 1;
@@ -81,7 +80,13 @@ export function validateConfig(cfg) {
   return problems;
 }
 
-export function createSignalingServer(config, { log = defaultLog } = {}) {
+/**
+ * @param {object} config см. DEFAULT_CONFIG
+ * @param {{WebSocketServer: typeof import('ws').WebSocketServer, log?: Function}} deps класс WebSocketServer
+ *   из пакета ws передаётся снаружи: так этот файл без своих зависимостей загружается и из приложения
+ *   стримера (встроенный сервер, ws — зависимость приложения), и отдельным процессом (main ниже).
+ */
+export function createSignalingServer(config, { WebSocketServer, log = defaultLog }) {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   const problems = validateConfig(cfg);
   if (problems.length) throw new Error(problems.join('\n'));
@@ -271,7 +276,7 @@ export function createSignalingServer(config, { log = defaultLog } = {}) {
   };
 }
 
-function lanAddresses() {
+export function lanAddresses() {
   const result = [];
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
     for (const a of list ?? []) {
@@ -291,7 +296,8 @@ async function main() {
     process.exit(1);
   }
 
-  const server = createSignalingServer(cfg);
+  const { WebSocketServer } = await import('ws');
+  const server = createSignalingServer(cfg, { WebSocketServer });
   try {
     await server.listen();
   } catch (err) {

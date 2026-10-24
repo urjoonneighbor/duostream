@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 import { createSignalingServer, validateConfig, PROTOCOL_VERSION } from '../src/server.js';
 import { deriveKey, hmacHex, authMessage } from '../src/crypto.js';
 
@@ -10,7 +10,7 @@ const KEY = deriveKey(PASSWORD);
 async function startServer(extra = {}) {
   const server = createSignalingServer(
     { host: '127.0.0.1', port: 0, password: PASSWORD, heartbeatSeconds: 60, ...extra },
-    { log: () => {} },
+    { WebSocketServer, log: () => {} },
   );
   const { port } = await server.listen();
   return { server, port };

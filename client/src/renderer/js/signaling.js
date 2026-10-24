@@ -110,12 +110,14 @@ export class SignalingClient extends EventTarget {
       });
       return;
     }
-    if (Math.abs(Date.now() - msg.ts) > MAX_CLOCK_SKEW_MS) {
+    // Подлинность уже проверена подписью; неверные часы на одном из ПК не должны ломать соединение,
+    // поэтому только предупреждаем (один раз)
+    if (Math.abs(Date.now() - msg.ts) > MAX_CLOCK_SKEW_MS && !this.clockWarned) {
+      this.clockWarned = true;
       this.emit('server-error', {
         code: 'clock-skew',
         message: 'Часы на компьютерах расходятся больше чем на 15 минут — включите синхронизацию времени в Windows',
       });
-      return;
     }
     await this.onSignal?.(JSON.parse(msg.payload));
   }

@@ -9,6 +9,8 @@ const DEFAULTS = Object.freeze({
     password: '',
     role: 'streamer',
     displayName: '',
+    hostServer: true,
+    serverPort: 8787,
   },
   video: {
     width: 2560,
@@ -90,6 +92,9 @@ function sanitize(input) {
   c.signaling.password = typeof c.signaling.password === 'string' ? c.signaling.password : '';
   c.signaling.role = oneOf(c.signaling.role, ['streamer', 'viewer'], d.signaling.role);
   c.signaling.displayName = str(c.signaling.displayName).slice(0, 64);
+  // Стример: запускать сигнальный сервер внутри приложения (отдельный Node.js не нужен)
+  c.signaling.hostServer = bool(c.signaling.hostServer, d.signaling.hostServer);
+  c.signaling.serverPort = clampInt(c.signaling.serverPort, 1, 65535, d.signaling.serverPort);
 
   const v = c.video;
   // 0×0 = нативное разрешение источника

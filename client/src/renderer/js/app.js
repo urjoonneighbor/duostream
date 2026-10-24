@@ -4,7 +4,7 @@ import { SignalingClient } from './signaling.js';
 import { PeerSession } from './peer.js';
 import { MicPipeline } from './audio.js';
 import { probeVideoCodecs, orderCodecs } from './codecs.js';
-import { StatsMonitor, describeStats, formatKbps, formatPath } from './stats.js';
+import { StatsMonitor, describeStats, describeIce, formatKbps, formatPath } from './stats.js';
 import { openSourcePicker } from './picker.js';
 import { NativeCaptureTrack, nativeCaptureStatus } from './native-capture.js';
 import { SettingsDialog } from './settings.js';
@@ -31,6 +31,7 @@ const state = {
   denoiseErrorShown: false,
   screen: null, // MediaStream захвата экрана (стример)
   capture: null, // {engine:'native'|'chromium', native, width, height, scale}
+  hostedServer: null, // встроенный сигнальный сервер стримера: {port, own, address}
   lastPick: null, // последний выбранный источник — для отката на захват Chromium
   nativeStatus: null, // доступен ли собственный захват (src/main/native-capture.js)
   nativeStats: null,
@@ -57,38 +58,99 @@ function fillConnectForm() {
   const s = state.cfg.signaling;
   for (const radio of document.querySelectorAll('input[name=role]')) radio.checked = radio.value === s.role;
   $('#fUrl').value = s.url;
+  $('#fHostServer').checked = s.hostServer;
+  $('#fPort').value = s.serverPort;
   $('#fPassword').value = s.password;
   $('#fName').value = s.displayName;
-  updateConnectHint();
+  updateConnectFields();
 }
 
 function selectedRole() {
   return document.querySelector('input[name=role]:checked')?.value ?? 'streamer';
 }
 
+/** Стример со встроенным сервером указывает порт, остальные — адрес сервера. */
+function hostsServer() {
+  return selectedRole() === 'streamer' && $('#fHostServer').checked;
+}
+
+function updateConnectFields() {
+  const streamer = selectedRole() === 'streamer';
+  $('#fHostField').hidden = !streamer;
+  $('#fPortField').hidden = !hostsServer();
+  $('#fUrlField').hidden = hostsServer();
+  updateConnectHint();
+}
+
 function updateConnectHint(text, isError = false) {
   const hint = $('#connectHint');
   hint.classList.toggle('error', isError);
-  hint.textContent =
-    text ??
-    (selectedRole() === 'streamer'
-      ? 'Сервер запущен на этом ПК — адрес ws://127.0.0.1:8787. Зрителю передайте ws://<ваш белый IP>:8787 и пароль.'
-      : 'Адрес даст стример: ws://<его белый IP>:8787. Пароль — тот же, что в server/config.json.');
+  let fallback;
+  if (hostsServer()) {
+    fallback = 'Сервер запустится в приложении. Пробросьте этот порт на роутере — адрес для зрителя появится после подключения.';
+  } else if (selectedRole() === 'streamer') {
+    fallback = 'Отдельный сервер (server/) на этом ПК — обычно ws://127.0.0.1:8787.';
+  } else {
+    fallback = 'Адрес и пароль даст стример: ws://<его белый IP>:8787.';
+  }
+  hint.textContent = text ?? fallback;
+}
+
+/** Внешний IP через STUN (srflx-кандидат) — чтобы показать стримеру готовый адрес для зрителя. */
+async function detectPublicIp(network) {
+  if (network.publicIp) return network.publicIp;
+  const pc = new RTCPeerConnection({ iceServers: network.iceServers });
+  try {
+    const found = new Promise((resolve) => {
+      setTimeout(() => resolve(null), 4000);
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) resolve(null);
+        else if (e.candidate.type === 'srflx' && e.candidate.address && !e.candidate.address.includes(':')) resolve(e.candidate.address);
+      };
+    });
+    pc.createDataChannel('probe');
+    await pc.setLocalDescription(await pc.createOffer());
+    return await found;
+  } catch {
+    return null;
+  } finally {
+    pc.close();
+  }
+}
+
+/** Запускает встроенный сервер; если порт уже занят (работает отдельный server/), подключаемся к нему. */
+async function startHostedServer(port, password) {
+  const result = await window.duo.server.start(port, password);
+  if (!result.ok && result.code !== 'EADDRINUSE') throw new Error(`встроенный сервер не запустился: ${result.error}`);
+  if (!result.ok) toast(`Порт ${port} уже занят — подключаюсь к уже запущенному серверу`, 'warn', 7000);
+  state.hostedServer = { port, own: result.ok, address: `ws://<ваш белый IP>:${port}` };
+  detectPublicIp(state.cfg.network).then((ip) => {
+    if (ip && state.hostedServer?.port === port) {
+      state.hostedServer.address = `ws://${ip}:${port}`;
+      render();
+    }
+  });
 }
 
 async function connect(event) {
   event.preventDefault();
   const role = selectedRole();
-  const url = $('#fUrl').value.trim();
+  const hostServer = role === 'streamer' && $('#fHostServer').checked;
+  const port = Math.round(Number($('#fPort').value));
+  const url = hostServer ? `ws://127.0.0.1:${port}` : $('#fUrl').value.trim();
   const password = $('#fPassword').value;
   const name = $('#fName').value.trim();
+  if (hostServer && !(port >= 1 && port <= 65535)) return updateConnectHint('Порт — число от 1 до 65535, обычно 8787', true);
   if (!/^wss?:\/\/[^\s/]+/i.test(url)) return updateConnectHint('Адрес должен начинаться с ws://, например ws://203.0.113.10:8787', true);
-  if (password.length < 8) return updateConnectHint('Пароль — не короче 8 символов, такой же, как в server/config.json', true);
+  if (password.length < 8) return updateConnectHint('Пароль — не короче 8 символов, одинаковый у стримера и зрителя', true);
 
   $('#btnConnect').disabled = true;
   try {
-    state.cfg = await window.duo.saveConfig({ ...state.cfg, signaling: { url, password, role, displayName: name } });
+    const signalingCfg = { ...state.cfg.signaling, password, role, displayName: name, hostServer, serverPort: port || state.cfg.signaling.serverPort };
+    if (!hostServer) signalingCfg.url = url;
+    state.cfg = await window.duo.saveConfig({ ...state.cfg, signaling: signalingCfg });
     state.role = role;
+    if (hostServer) await startHostedServer(port, password);
     await ensureMic();
     if (role === 'streamer') await ensureCodecProbe();
 
@@ -163,6 +225,9 @@ function teardown() {
   state.signaling = null;
   state.peer = null;
   signaling?.close();
+  // Встроенный сервер живёт, пока стример подключён
+  if (state.hostedServer?.own) window.duo.server.stop();
+  state.hostedServer = null;
   state.mic?.stop();
   state.mic = null;
   render();
@@ -648,7 +713,21 @@ function renderQuality(stats) {
   if (state.hudOpen) {
     const extra = state.mic ? { Шумодав: denoiseSummary() } : {};
     if (state.capture) extra['Захват'] = captureSummary();
-    renderList($('#hudList'), stats ? describeStats(stats, extra) : [['', 'Нет активного P2P-соединения']]);
+    if (stats) {
+      renderList($('#hudList'), describeStats(stats, extra));
+    } else if (state.session) {
+      // P2P ещё не установлено — показываем, на каком шаге застряли
+      const session = state.session;
+      describeIce(session.pc)
+        .then((rows) => {
+          if (state.hudOpen && state.session === session && !state.stats) {
+            renderList($('#hudList'), [['P2P', 'ещё не установлено'], ...rows]);
+          }
+        })
+        .catch(() => {});
+    } else {
+      renderList($('#hudList'), [['', state.peer ? 'P2P-сессия ещё не создана' : 'Нет активного P2P-соединения']]);
+    }
   }
 }
 
@@ -776,7 +855,19 @@ function render() {
   // Сцена
   let message = null;
   let videoStream = null;
-  if (connected && streamer) {
+  if (connected && signaling.state !== 'open') {
+    // Сначала — связь с сигнальным сервером: без неё про собеседника ничего не известно
+    message =
+      signaling.state === 'reconnecting'
+        ? {
+            title: 'Нет связи с сигнальным сервером',
+            sub:
+              `${signaling.url} не отвечает. Проверьте: сервер запущен; адрес верный (из другой сети — белый IP, ` +
+              'а не 192.168.x.x); на роутере проброшен TCP-порт; брандмауэр Windows на ПК стримера пропускает порт.',
+            spinner: true,
+          }
+        : { title: 'Подключение к серверу…', sub: signaling.url, spinner: true };
+  } else if (connected && streamer) {
     if (state.screen && state.cfg.video.showPreview) videoStream = state.screen;
     else if (state.screen) message = { title: 'Идёт трансляция', sub: `${state.sourceName}. Предпросмотр выключен в настройках.` };
     else
@@ -788,7 +879,12 @@ function render() {
       };
   } else if (connected) {
     if (!state.peer) message = { title: 'Ожидание стримера', sub: 'Стример ещё не подключился к серверу.', spinner: true };
-    else if (pcState !== 'connected') message = { title: 'Установка P2P-соединения…', sub: 'Обмен ICE-кандидатами со стримером.', spinner: true };
+    else if (pcState !== 'connected')
+      message = {
+        title: 'Установка P2P-соединения…',
+        sub: 'Обмен ICE-кандидатами со стримером. Если затянулось — подробности по кнопке «Соединение…» справа внизу.',
+        spinner: true,
+      };
     else if (!state.remote.live) message = { title: `${state.peer.name} ещё не начал трансляцию`, sub: 'Голосовой чат уже работает.' };
     else if (state.remoteVideo) videoStream = state.remoteVideo;
   }
@@ -806,6 +902,10 @@ function render() {
     $('#stageSub').textContent = message.sub;
     $('#stageSpinner').hidden = !message.spinner;
   }
+  // Пока зритель не подключился — показываем стримеру адрес, который нужно ему передать
+  const share = Boolean(message) && streamer && Boolean(state.hostedServer) && !state.peer;
+  $('#shareBox').hidden = !share;
+  if (share) $('#shareAddress').textContent = state.hostedServer.address;
 
   // Кнопки
   const streamBtn = $('#btnStream');
@@ -863,7 +963,16 @@ function restoreVolumes() {
 
 function bindEvents() {
   $('#connectCard').addEventListener('submit', connect);
-  for (const radio of document.querySelectorAll('input[name=role]')) radio.addEventListener('change', () => updateConnectHint());
+  for (const radio of document.querySelectorAll('input[name=role]')) radio.addEventListener('change', updateConnectFields);
+  $('#fHostServer').addEventListener('change', updateConnectFields);
+  $('#btnCopyAddress').addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(state.hostedServer?.address ?? '');
+      toast('Адрес скопирован', 'ok', 2000);
+    } catch (err) {
+      toast(`Не удалось скопировать: ${err.message}`, 'warn');
+    }
+  });
   $('#btnStream').addEventListener('click', () => (state.screen ? stopStream() : startStream()));
   $('#btnDisconnect').addEventListener('click', disconnect);
   $('#btnMic').addEventListener('click', toggleMic);

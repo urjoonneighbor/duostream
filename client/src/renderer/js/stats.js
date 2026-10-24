@@ -136,6 +136,40 @@ export function formatPath(path) {
   return `${kind} · ${CANDIDATE[path.local] ?? path.local} ↔ ${CANDIDATE[path.remote] ?? path.remote} · ${String(path.protocol).toUpperCase()}`;
 }
 
+/**
+ * Диагностика, пока P2P не установлено: дошли ли сигналы, какие кандидаты есть с обеих сторон
+ * и проходят ли проверки связности (STUN-запросы ICE).
+ */
+export async function describeIce(pc) {
+  const report = await pc.getStats();
+  const local = [];
+  const remote = [];
+  const pairs = {};
+  let sent = 0;
+  let responses = 0;
+  let incoming = 0;
+  report.forEach((s) => {
+    if (s.type === 'local-candidate' || s.type === 'remote-candidate') {
+      const text = `${s.candidateType} ${s.address ?? '?'}:${s.port}${s.protocol === 'tcp' ? '/tcp' : ''}`;
+      (s.type === 'local-candidate' ? local : remote).push(text);
+    } else if (s.type === 'candidate-pair') {
+      pairs[s.state] = (pairs[s.state] ?? 0) + 1;
+      sent += s.requestsSent ?? 0;
+      responses += s.responsesReceived ?? 0;
+      incoming += s.requestsReceived ?? 0;
+    }
+  });
+  const list = (items) => [...new Set(items)].join(', ') || 'нет';
+  return [
+    ['Ответ собеседника (SDP)', pc.remoteDescription ? 'получен' : 'не получен — сигналы WebRTC не доходят'],
+    ['Состояние ICE', `${pc.iceConnectionState}, сбор кандидатов: ${pc.iceGatheringState}`],
+    ['Свои кандидаты', list(local)],
+    ['Кандидаты собеседника', list(remote)],
+    ['Пары кандидатов', Object.entries(pairs).map(([k, v]) => `${k}: ${v}`).join(', ') || 'нет'],
+    ['Проверки связности', `отправлено ${sent}, ответов ${responses}, входящих ${incoming}`],
+  ];
+}
+
 /** Строки для подробной панели статистики */
 export function describeStats(s, extra = {}) {
   const lines = [];

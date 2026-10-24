@@ -13,6 +13,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { loadConfig, saveConfig } = require('./config');
 const { NativeCapture } = require('./native-capture');
+const { EmbeddedServer } = require('./embedded-server');
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 const RENDERER_ROOT = path.join(APP_ROOT, 'src', 'renderer');
@@ -81,6 +82,7 @@ let current = { config: null, error: null };
 /** Источник, выбранный в окне выбора экрана, ждёт вызова getDisplayMedia */
 let pendingCapture = null;
 const nativeCapture = new NativeCapture();
+const embeddedServer = new EmbeddedServer();
 
 function registerAppProtocol() {
   protocol.handle('app', async (request) => {
@@ -198,6 +200,23 @@ function registerIpc() {
     return true;
   });
 
+  ipcMain.handle('server:start', async (event, request) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    const port = Math.round(Number(request?.port));
+    const password = String(request?.password ?? '');
+    if (!(port >= 1 && port <= 65535)) return { ok: false, error: 'некорректный порт' };
+    try {
+      return { ok: true, ...(await embeddedServer.start({ port, password })) };
+    } catch (err) {
+      return { ok: false, code: err.code ?? null, error: err.message };
+    }
+  });
+
+  ipcMain.handle('server:stop', async (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    await embeddedServer.stop();
+  });
+
   ipcMain.handle('native-capture:status', (event) => {
     if (!isTrustedSender(event)) throw new Error('forbidden');
     return nativeCapture.status();
@@ -301,4 +320,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => app.quit());
-app.on('before-quit', () => nativeCapture.stop());
+app.on('before-quit', () => {
+  nativeCapture.stop();
+  embeddedServer.stop();
+});

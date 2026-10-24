@@ -32,9 +32,16 @@
             <label><input type="radio" name="role" value="streamer" /><span>Я стример</span></label>
             <label><input type="radio" name="role" value="viewer" /><span>Я зритель</span></label>
           </div>
-          <label class="field">
+          <label class="check" id="fHostField">
+            <input type="checkbox" id="fHostServer" /><span>Запустить сигнальный сервер в приложении</span>
+          </label>
+          <label class="field" id="fPortField">
+            <span>Порт сервера (TCP, пробросить на роутере)</span>
+            <input id="fPort" type="number" min="1" max="65535" />
+          </label>
+          <label class="field" id="fUrlField">
             <span>Сигнальный сервер</span>
-            <input id="fUrl" placeholder="ws://203.0.113.10:8787" required spellcheck="false" />
+            <input id="fUrl" placeholder="ws://203.0.113.10:8787" spellcheck="false" />
           </label>
           <label class="field">
             <span>Пароль комнаты</span>
@@ -52,6 +59,11 @@
           <div class="spinner" id="stageSpinner"></div>
           <p class="title" id="stageTitle"></p>
           <p class="sub" id="stageSub"></p>
+          <div class="share" id="shareBox" hidden>
+            <span>Адрес для зрителя (пароль тот же):</span>
+            <code id="shareAddress"></code>
+            <button type="button" id="btnCopyAddress">Копировать</button>
+          </div>
         </div>
       </div>
 

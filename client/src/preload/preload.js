@@ -24,6 +24,10 @@ contextBridge.exposeInMainWorld('duo', {
   listSources: () => ipcRenderer.invoke('capture:list-sources'),
   selectSource: (source, audio) => ipcRenderer.invoke('capture:select', { id: source.id, name: source.name, audio }),
   getAppInfo: () => ipcRenderer.invoke('app:info'),
+  server: {
+    start: (port, password) => ipcRenderer.invoke('server:start', { port, password }),
+    stop: () => ipcRenderer.invoke('server:stop'),
+  },
   nativeCapture: {
     status: () => ipcRenderer.invoke('native-capture:status'),
     start: (sourceId, fps) => ipcRenderer.invoke('native-capture:start', { sourceId, fps }),
