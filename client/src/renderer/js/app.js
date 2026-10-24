@@ -31,7 +31,9 @@ const state = {
   denoiseErrorShown: false,
   screen: null, // MediaStream захвата экрана (стример)
   capture: null, // {engine:'native'|'chromium', native, width, height, scale}
-  hostedServer: null, // встроенный сигнальный сервер стримера: {port, own, address}
+  hostedServer: null, // встроенный сигнальный сервер стримера: {port, own}
+  share: null, // стример: {address} — что передать зрителю
+  publicIp: null, // белый IP стримера (настройка, HTTPS или STUN)
   lastPick: null, // последний выбранный источник — для отката на захват Chromium
   nativeStatus: null, // доступен ли собственный захват (src/main/native-capture.js)
   nativeStats: null,
@@ -44,6 +46,9 @@ const state = {
   lastEncoderRestart: 0, // когда последний раз пересоздавали сессию из-за ухода энкодера на CPU
   pathAnnounced: false,
   hudOpen: false,
+  outputs: new Map(), // deviceId → название устройства вывода звука
+  voicePeakDb: -Infinity, // максимум уровня голоса собеседника с прошлого тика статистики
+  voiceDb: -Infinity, // то же за последнюю завершённую секунду (для окна статистики)
 };
 
 // Для отладки в DevTools (F12): duoDebug.session.pc.remoteDescription.sdp и т. п.
@@ -96,9 +101,17 @@ function updateConnectHint(text, isError = false) {
   hint.textContent = text ?? fallback;
 }
 
-/** Внешний IP через STUN (srflx-кандидат) — чтобы показать стримеру готовый адрес для зрителя. */
+/**
+ * Внешний IP стримера для адреса зрителю и кандидатов проброшенного порта: из настроек, иначе
+ * по HTTPS (так же, как зритель придёт к серверу по TCP), и только в крайнем случае через STUN —
+ * провайдер или роутер может уводить UDP к серверам Google через другой адрес.
+ */
 async function detectPublicIp(network) {
   if (network.publicIp) return network.publicIp;
+  return (await window.duo.getPublicIp()) ?? stunPublicIp(network);
+}
+
+async function stunPublicIp(network) {
   const pc = new RTCPeerConnection({ iceServers: network.iceServers });
   try {
     const found = new Promise((resolve) => {
@@ -123,12 +136,18 @@ async function startHostedServer(port, password) {
   const result = await window.duo.server.start(port, password);
   if (!result.ok && result.code !== 'EADDRINUSE') throw new Error(`встроенный сервер не запустился: ${result.error}`);
   if (!result.ok) toast(`Порт ${port} уже занят — подключаюсь к уже запущенному серверу`, 'warn', 7000);
-  state.hostedServer = { port, own: result.ok, address: `ws://<ваш белый IP>:${port}` };
+  state.hostedServer = { port, own: result.ok };
+}
+
+/** Стример: адрес, который нужно передать зрителю, и белый IP для кандидатов проброшенного порта. */
+function prepareShareAddress(port) {
+  state.share = { address: `ws://<ваш белый IP>:${port}` };
   detectPublicIp(state.cfg.network).then((ip) => {
-    if (ip && state.hostedServer?.port === port) {
-      state.hostedServer.address = `ws://${ip}:${port}`;
-      render();
-    }
+    if (!ip || !state.share) return;
+    state.publicIp = ip;
+    state.share.address = `ws://${ip}:${port}`;
+    if (state.role === 'streamer') state.session?.addPublicIp(ip);
+    render();
   });
 }
 
@@ -151,6 +170,7 @@ async function connect(event) {
     state.cfg = await window.duo.saveConfig({ ...state.cfg, signaling: signalingCfg });
     state.role = role;
     if (hostServer) await startHostedServer(port, password);
+    if (role === 'streamer') prepareShareAddress(hostServer ? port : Number(new URL(url).port) || 80);
     await ensureMic();
     if (role === 'streamer') await ensureCodecProbe();
 
@@ -228,6 +248,7 @@ function teardown() {
   // Встроенный сервер живёт, пока стример подключён
   if (state.hostedServer?.own) window.duo.server.stop();
   state.hostedServer = null;
+  state.share = null;
   state.mic?.stop();
   state.mic = null;
   render();
@@ -249,6 +270,7 @@ function createSession(role, sid) {
     send: (msg) => state.signaling?.sendSignal(msg) ?? Promise.resolve(false),
     micTrack: state.mic?.track ?? null,
     serverHost,
+    publicIp: role === 'streamer' ? state.publicIp : null,
   });
   session.addEventListener('track', onRemoteTrack);
   session.addEventListener('state', (e) => onPeerState(session, e.detail.state));
@@ -651,6 +673,7 @@ async function ensureMic() {
   try {
     await mic.start(state.cfg.audio);
     state.mic = mic;
+    refreshOutputs(); // после разрешения на микрофон у устройств появляются названия
   } catch (err) {
     mic.stop();
     toast(`Микрофон недоступен (${err.message}). Подключаюсь без голоса.`, 'warn', 8000);
@@ -680,15 +703,41 @@ function denoiseSummary() {
   return `DTLN · ${p.avgMs.toFixed(2)} мс на кадр 8 мс (макс ${p.maxMs.toFixed(1)}), пропусков ${p.underruns + p.dropped}`;
 }
 
+/** Шкала индикатора: −60…0 дБ → 0…1, как у индикатора микрофона */
+const meterScale = (db) => Math.min(1, Math.max(0, (db + 60) / 60));
+
 function meterLoop() {
   const level = state.mic?.level() ?? 0;
   $('#micLevel').style.transform = `scaleX(${level.toFixed(3)})`;
+  const voice = state.session?.remoteVoiceLevel() ?? 0;
+  const voiceDb = voice > 0 ? 20 * Math.log10(voice) : -Infinity;
+  state.voicePeakDb = Math.max(state.voicePeakDb, voiceDb);
+  $('#voiceLevel').style.transform = `scaleX(${meterScale(voiceDb).toFixed(3)})`;
   requestAnimationFrame(meterLoop);
+}
+
+/** Куда выводится голос собеседника — по названию устройства, а не по deviceId */
+function outputLabel() {
+  const id = state.cfg.audio.outputDeviceId;
+  return state.outputs.get(id) ?? (id === 'default' ? 'устройство по умолчанию' : 'выбранное устройство (сейчас не найдено)');
+}
+
+async function refreshOutputs() {
+  const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+  state.outputs = new Map(devices.filter((d) => d.kind === 'audiooutput' && d.label).map((d) => [d.deviceId, d.label]));
+}
+
+function voiceSummary() {
+  const db = state.voiceDb;
+  const level = db > -55 ? `есть звук (${Math.round(db)} дБ)` : 'тишина: собеседник молчит или выключил микрофон';
+  return `${level} → ${outputLabel()}`;
 }
 
 // ======================= статистика =======================
 
 async function tickStats() {
+  state.voiceDb = state.voicePeakDb;
+  state.voicePeakDb = -Infinity;
   const monitor = state.monitor;
   if (!monitor || state.session?.pc.connectionState !== 'connected') {
     renderQuality(null);
@@ -718,7 +767,8 @@ function renderQuality(stats) {
     $('#qualityText').textContent = `${out ? '↑' : '↓'} ${formatKbps(kbps)} · ${ping} · потери ${loss}`;
   }
   if (state.hudOpen) {
-    const extra = state.mic ? { Шумодав: denoiseSummary() } : {};
+    const extra = { 'Голос собеседника': voiceSummary() };
+    if (state.mic) extra['Шумодав'] = denoiseSummary();
     if (state.capture) extra['Захват'] = captureSummary();
     if (stats) {
       renderList($('#hudList'), describeStats(stats, extra));
@@ -832,6 +882,9 @@ async function collectDiagnostics() {
   const range = info.udpPortRange;
   rows.push(['UDP-порты WebRTC', range?.min ? `${range.min}–${range.max}` : 'без ограничений']);
   if (state.mic) rows.push(['Микрофон', state.mic.deviceLabel || '—'], ['Шумодав', denoiseSummary()]);
+  await refreshOutputs();
+  rows.push(['Вывод звука', outputLabel()]);
+  if (state.session) rows.push(['Голос собеседника', voiceSummary()]);
   if (state.stats) rows.push(...describeStats(state.stats));
   if (info.profile) rows.push(['Профиль', info.profile]);
   return rows;
@@ -910,9 +963,9 @@ function render() {
     $('#stageSpinner').hidden = !message.spinner;
   }
   // Пока зритель не подключился — показываем стримеру адрес, который нужно ему передать
-  const share = Boolean(message) && streamer && Boolean(state.hostedServer) && !state.peer;
+  const share = Boolean(message) && streamer && Boolean(state.share) && !state.peer;
   $('#shareBox').hidden = !share;
-  if (share) $('#shareAddress').textContent = state.hostedServer.address;
+  if (share) $('#shareAddress').textContent = state.share.address;
 
   // Кнопки
   const streamBtn = $('#btnStream');
@@ -974,7 +1027,7 @@ function bindEvents() {
   $('#fHostServer').addEventListener('change', updateConnectFields);
   $('#btnCopyAddress').addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText(state.hostedServer?.address ?? '');
+      await navigator.clipboard.writeText(state.share?.address ?? '');
       toast('Адрес скопирован', 'ok', 2000);
     } catch (err) {
       toast(`Не удалось скопировать: ${err.message}`, 'warn');
@@ -999,6 +1052,7 @@ function bindEvents() {
     }
   });
   window.addEventListener('beforeunload', () => state.session?.send({ kind: 'bye' }));
+  navigator.mediaDevices.addEventListener('devicechange', refreshOutputs);
 }
 
 async function init() {
@@ -1016,6 +1070,7 @@ async function init() {
   fillConnectForm();
   bindEvents();
   restoreVolumes();
+  refreshOutputs();
   render();
   setInterval(() => tickStats().catch((err) => console.warn('[stats]', err)), 1000);
   requestAnimationFrame(meterLoop);

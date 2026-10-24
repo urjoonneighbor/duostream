@@ -65,7 +65,7 @@
 | `iceServers` | Google STUN ×2 | STUN/TURN-серверы в формате WebRTC `RTCIceServer` |
 | `turn.enabled`, `turn.urls`, `turn.username`, `turn.credential` | выкл | Резервный TURN ([04-optional-turn.md](04-optional-turn.md)) |
 | `udpPortRange.min`, `.max` | `50000`, `50019` | Диапазон UDP-портов WebRTC; должен совпадать с пробросом на роутере. `0`, `0` — без ограничения (тогда кандидаты для проброса не создаются) |
-| `publicIp` | `""` | Белый IP стримера; пусто — определяется через STUN |
+| `publicIp` | `""` | Белый IP стримера; пусто — определяется по HTTPS-запросу к api.ipify.org (тем же путём, что TCP-подключение зрителя), при неудаче — через STUN. STUN может вернуть чужой адрес, если провайдер или роутер уводит UDP к Google другим маршрутом |
 | `forceRelay` | `false` | Только TURN (для проверки релея) |
 
 ### playback — воспроизведение (у зрителя)

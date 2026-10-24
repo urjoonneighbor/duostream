@@ -239,9 +239,18 @@ textarea {
   gap: 6px;
   min-width: 0;
 }
-.field > span {
+.field > span,
+.field > label {
   color: var(--muted);
   font-size: 12px;
+}
+.with-button {
+  display: flex;
+  gap: 8px;
+}
+.with-button select {
+  flex: 1;
+  min-width: 0;
 }
 .hint {
   color: var(--muted);

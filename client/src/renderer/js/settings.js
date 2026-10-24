@@ -17,6 +17,35 @@ function fillDeviceSelect(select, devices, selected, fallbackName) {
 
 const num = (id) => Number($(id).value);
 
+/** Два коротких тона на устройство вывода — проверить, то ли устройство выбрано */
+async function playTestTone(deviceId) {
+  const ctx = new AudioContext();
+  try {
+    if (deviceId && deviceId !== 'default') await ctx.setSinkId(deviceId);
+    const t = ctx.currentTime + 0.05;
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+    gain.gain.setValueAtTime(0, t);
+    let end = t;
+    for (const [freq, start] of [
+      [660, 0],
+      [880, 0.3],
+    ]) {
+      const osc = ctx.createOscillator();
+      osc.frequency.value = freq;
+      osc.connect(gain);
+      osc.start(t + start);
+      osc.stop(t + start + 0.25);
+      gain.gain.setTargetAtTime(0.25, t + start, 0.01);
+      gain.gain.setTargetAtTime(0, t + start + 0.2, 0.015);
+      end = t + start + 0.25;
+    }
+    await new Promise((resolve) => setTimeout(resolve, (end - ctx.currentTime + 0.1) * 1000));
+  } finally {
+    await ctx.close();
+  }
+}
+
 export class SettingsDialog {
   /**
    * @param {{onSave:(cfg:object)=>Promise<void>, getDiagnostics:()=>Promise<Array<[string,string]>>}} options
@@ -29,6 +58,17 @@ export class SettingsDialog {
     this.tabs.forEach((b) => b.addEventListener('click', () => this.showTab(b.dataset.tab)));
 
     $('#btnSettingsCancel').addEventListener('click', () => this.dialog.close());
+    $('#btnTestOutput').addEventListener('click', async () => {
+      const button = $('#btnTestOutput');
+      button.disabled = true;
+      try {
+        await playTestTone($('#sOutput').value);
+      } catch (err) {
+        toast(`Не удалось вывести звук на это устройство: ${err.message}`, 'error');
+      } finally {
+        button.disabled = false;
+      }
+    });
     $('#btnOpenConfig').addEventListener('click', async () => {
       const error = await window.duo.openConfigFile();
       if (error) toast(`Не удалось открыть файл: ${error}`, 'error');

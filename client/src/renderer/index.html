@@ -86,8 +86,9 @@
         <button class="toggle" id="btnDenoise" title="Шумоподавление (DTLN, ONNX Runtime)" disabled>
           <i data-icon="wave"></i><span id="denoiseText">Шумодав</span>
         </button>
-        <label class="volume" title="Громкость собеседника">
-          <span>Голос</span><input type="range" id="voiceVolume" min="0" max="100" value="100" />
+        <label class="volume" title="Громкость собеседника; индикатор — уровень его голоса, который до нас доходит">
+          <span>Голос</span><span class="meter"><i id="voiceLevel"></i></span>
+          <input type="range" id="voiceVolume" min="0" max="100" value="100" />
         </label>
         <label class="volume" id="streamVolumeWrap" title="Громкость звука трансляции" hidden>
           <span>Стрим</span><input type="range" id="streamVolume" min="0" max="100" value="80" />
@@ -208,7 +209,13 @@
         <section data-panel="audio" hidden>
           <div class="row">
             <label class="field"><span>Микрофон</span><select id="sMic"></select></label>
-            <label class="field"><span>Устройство вывода звука</span><select id="sOutput"></select></label>
+            <div class="field">
+              <label for="sOutput">Устройство вывода звука</label>
+              <div class="with-button">
+                <select id="sOutput"></select>
+                <button type="button" id="btnTestOutput" title="Короткий сигнал на выбранное устройство">Проверить</button>
+              </div>
+            </div>
           </div>
           <label class="check"><input type="checkbox" id="sDenoise" /><span>Шумоподавление (DTLN на ONNX Runtime, локально)</span></label>
           <label class="check"><input type="checkbox" id="sEcho" /><span>Эхоподавление (выключите, если вы в наушниках)</span></label>
@@ -228,6 +235,10 @@
             Системный звук захватывается целиком с устройства вывода по умолчанию. Чтобы зритель не слышал
             сам себя, выберите для голоса собеседника другое устройство вывода (например, гарнитуру).
           </p>
+          <p class="hint">
+            Не слышно собеседника? Нажмите «Проверить»: если сигнала нет, выберите устройство, к которому
+            подключены наушники или колонки. Индикатор у ползунка «Голос» внизу окна показывает, доходит ли его звук.
+          </p>
         </section>
 
         <section data-panel="network" hidden>
@@ -240,7 +251,7 @@
             <label class="field"><span>до</span><input id="sPortMax" type="number" min="0" max="65535" /></label>
           </div>
           <label class="field">
-            <span>Белый IP стримера (необязательно — определяется через STUN)</span>
+            <span>Белый IP стримера (необязательно — определяется автоматически)</span>
             <input id="sPublicIp" placeholder="203.0.113.10" spellcheck="false" />
           </label>
           <fieldset>
