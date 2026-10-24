@@ -110,11 +110,12 @@ npm run build:native
 npm start
 ```
 
-Если npm 11 пишет `allow-scripts` и Electron не скачался — в `package.json` уже разрешён скрипт
-установки Electron; повторите `npm install`. Если GitHub недоступен, задайте зеркало и повторите:
+Сам Electron (~110 МБ) пакет `electron` скачивает не при `npm install`, а при первом `npm start`.
+Если при запуске появляется «Electron failed to install correctly» (Node не достучался до GitHub),
+поставьте его скриптом — он скачает Electron через PowerShell и проверит SHA-256:
 
 ```powershell
-$env:ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"; npm install
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-electron.ps1
 ```
 
 ## 5. Первый запуск
@@ -193,9 +194,10 @@ npm run test:denoiser
 npm run dist
 ```
 
-Скрипт `scripts/dist.ps1` собирает захват 120 FPS (нужен .NET SDK 10), скачивает инструменты
-упаковки (7-Zip и NSIS) через PowerShell с проверкой SHA-256 в `client/build-tools/` (из Node загрузки
-с GitHub на некоторых сетях обрываются) и запускает electron-builder. Результат в `client/dist`:
+Скрипт `scripts/dist.ps1` собирает захват 120 FPS (нужен .NET SDK 10), скачивает Electron, если
+его ещё нет (`npm start` можно не запускать), и инструменты упаковки (7-Zip и NSIS) — через PowerShell
+с проверкой SHA-256 (из Node загрузки с GitHub на некоторых сетях обрываются) — и запускает
+electron-builder. Результат в `client/dist`:
 
 - `DuoStream-Setup-1.0.0.exe` — установщик с ярлыками на рабочем столе и в «Пуске»;
 - `DuoStream-1.0.0-portable.exe` — один файл без установки;

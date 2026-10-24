@@ -7,6 +7,8 @@ npm run start:viewer # второй экземпляр с отдельным п�
 npm run build:native # собрать native/bin/duostream-capture.exe (захват 120 FPS)
 npm run test:denoiser
 npm run dist         # DuoStream-Setup / portable exe в dist/ (захват, сервер — всё внутри)
+# Electron не скачался («Electron failed to install correctly»):
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-electron.ps1
 ```
 
 Полная инструкция — [../docs/01-install.md](../docs/01-install.md), параметры —
