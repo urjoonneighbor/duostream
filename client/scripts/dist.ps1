@@ -3,10 +3,8 @@
 #  2. ставит Electron, если он ещё не скачан (scripts/ensure-electron.ps1);
 #  3. скачивает инструменты electron-builder (7-Zip, NSIS) через PowerShell с проверкой SHA-256 —
 #     загрузка из Node с GitHub на некоторых сетях обрывается (RequestError) — и кладёт их в build-tools/;
-#  4. запускает electron-builder. Результат — в dist/.
-# С ключом -Publish (так вызывает .github/workflows/release.yml) сборка ещё и публикуется в GitHub
-# Releases — нужен токен в GH_TOKEN. Без ключа ничего никуда не отправляется.
-param([switch]$Publish)
+#  4. запускает electron-builder. Результат — в dist/ (вместе с latest.yml для автообновления).
+# Скрипт ничего не публикует: релиз на GitHub создаёт .github/workflows/release.yml.
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $tools = Join-Path $root 'build-tools'
@@ -44,5 +42,7 @@ $env:ELECTRON_BUILDER_7ZIP_PATH = $sevenZip
 $env:ELECTRON_BUILDER_NSIS_DIR = Get-Tool $assets.nsis $sevenZip
 $env:ELECTRON_BUILDER_NSIS_RESOURCES_DIR = Get-Tool $assets.nsisResources $sevenZip
 
-npx electron-builder --win nsis portable --publish $(if ($Publish) { 'always' } else { 'never' })
+# Публикацию electron-builder не доверяем: для установщика и portable он создаёт два публикатора,
+# и они одновременно создают один и тот же релиз — GitHub отвечает 422 обоим
+npx electron-builder --win nsis portable --publish never
 exit $LASTEXITCODE

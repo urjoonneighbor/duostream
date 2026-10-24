@@ -217,7 +217,8 @@ electron-builder. Результат в `client/dist`:
 
 `.github/workflows/release.yml` на каждый пуш в `master` (или вручную: Actions → Release → Run workflow)
 на Windows-машине GitHub ставит Node.js 24 и .NET 10, прогоняет тесты сервера и шумодава, собирает exe
-и публикует релиз `v1.0.<номер запуска>` с установщиком и portable-версией. Секреты настраивать не нужно —
+и одним вызовом `gh release create` публикует релиз `v1.0.<номер запуска>` с установщиком, portable-версией
+и `latest.yml` (по нему установленные копии находят обновление). Секреты настраивать не нужно —
 хватает встроенного `GITHUB_TOKEN`; в настройках репозитория (Settings → Actions → General → Workflow
 permissions) должно быть разрешено «Read and write permissions» или хотя бы права, выданные в самом
 workflow (`contents: write`).
