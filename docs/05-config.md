@@ -7,12 +7,13 @@
 
 | Как запущено | Файл |
 |---|---|
-| `npm start` из исходников | `client/config/stream.config.json` |
+| `npm start` из исходников | `client/config/stream.config.json` (личный, git его не отслеживает) |
 | `npm start -- --profile=<имя>` (второй экземпляр) | `%APPDATA%\DuoStream-<имя>\stream.config.json` |
 | Собранное приложение | `%APPDATA%\DuoStream\stream.config.json` |
 | С ключом `--config=<путь>` | указанный файл |
 
-Если файла нет, он создаётся из `client/config/stream.config.json`. Ошибочные значения при загрузке
+Если файла нет, он создаётся из шаблона `client/config/stream.config.default.json` — только шаблон
+попадает в собранный exe. Ошибочные значения при загрузке
 заменяются ближайшими допустимыми; при ошибке синтаксиса JSON приложение предупредит и возьмёт значения
 по умолчанию.
 
@@ -26,6 +27,8 @@
 | `password` | `""` | Общий пароль комнаты = `password` в `server/config.json` |
 | `role` | `streamer` | `streamer` или `viewer` |
 | `displayName` | `""` | Имя, которое увидит собеседник |
+| `hostServer` | `true` | Стример: запускать сигнальный сервер внутри приложения (отдельный `server/` не нужен) |
+| `serverPort` | `8787` | Порт встроенного сервера (TCP, пробросить на роутере) |
 
 ### video — трансляция (действует у стримера)
 

@@ -140,18 +140,17 @@ export function formatPath(path) {
  * Диагностика, пока P2P не установлено: дошли ли сигналы, какие кандидаты есть с обеих сторон
  * и проходят ли проверки связности (STUN-запросы ICE).
  */
-export async function describeIce(pc) {
+export async function describeIce(session) {
+  const { pc, diag } = session;
   const report = await pc.getStats();
   const local = [];
-  const remote = [];
   const pairs = {};
   let sent = 0;
   let responses = 0;
   let incoming = 0;
   report.forEach((s) => {
-    if (s.type === 'local-candidate' || s.type === 'remote-candidate') {
-      const text = `${s.candidateType} ${s.address ?? '?'}:${s.port}${s.protocol === 'tcp' ? '/tcp' : ''}`;
-      (s.type === 'local-candidate' ? local : remote).push(text);
+    if (s.type === 'local-candidate') {
+      local.push(`${s.candidateType} ${s.address ?? '?'}:${s.port}${s.protocol === 'tcp' ? '/tcp' : ''}`);
     } else if (s.type === 'candidate-pair') {
       pairs[s.state] = (pairs[s.state] ?? 0) + 1;
       sent += s.requestsSent ?? 0;
@@ -160,14 +159,23 @@ export async function describeIce(pc) {
     }
   });
   const list = (items) => [...new Set(items)].join(', ') || 'нет';
-  return [
+  const rows = [
     ['Ответ собеседника (SDP)', pc.remoteDescription ? 'получен' : 'не получен — сигналы WebRTC не доходят'],
     ['Состояние ICE', `${pc.iceConnectionState}, сбор кандидатов: ${pc.iceGatheringState}`],
-    ['Свои кандидаты', list(local)],
-    ['Кандидаты собеседника', list(remote)],
+    ['Свои кандидаты', `${list(local)} (отправлено собеседнику: ${diag.localSent})`],
+  ];
+  if (pc.iceGatheringState === 'complete' && !local.some((c) => c.startsWith('srflx'))) {
+    const errors = [...diag.stunErrors].join('; ');
+    rows.push(['Внешний адрес (STUN)', `не определён — UDP или STUN-серверы недоступны из этой сети${errors ? ` (${errors})` : ''}`]);
+  }
+  rows.push(
+    ['Кандидаты собеседника', diag.remote.size ? [...diag.remote.keys()].join(', ') : 'не получено ни одного'],
+    ...(diag.rejected.length ? [['Отклонены', diag.rejected.slice(-4).join('; ')]] : []),
     ['Пары кандидатов', Object.entries(pairs).map(([k, v]) => `${k}: ${v}`).join(', ') || 'нет'],
     ['Проверки связности', `отправлено ${sent}, ответов ${responses}, входящих ${incoming}`],
-  ];
+    ['Журнал', diag.events.slice(-8).join(' · ') || '—'],
+  );
+  return rows;
 }
 
 /** Строки для подробной панели статистики */

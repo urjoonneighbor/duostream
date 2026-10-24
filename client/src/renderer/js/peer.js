@@ -47,13 +47,31 @@ async function updateEncoding(sender, fields, degradationPreference) {
   }
 }
 
+/** «candidate:F 1 udp PRIO ADDR PORT typ TYPE …» → {protocol, address, port, type} */
+export function parseCandidate(line) {
+  const p = String(line ?? '').replace(/^a=/, '').split(' ');
+  if (p.length < 8 || p[6] !== 'typ') return null;
+  return { protocol: p[2].toLowerCase(), address: p[4], port: Number(p[5]), type: p[7] };
+}
+
+const describeCandidate = (c) => `${c.type} ${c.address}:${c.port}${c.protocol === 'tcp' ? '/tcp' : ''}`;
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+
 export class PeerSession extends EventTarget {
   /**
-   * @param {{role:'streamer'|'viewer', sid?:string, cfg:object, send:(msg:object)=>Promise<unknown>, micTrack:MediaStreamTrack|null}} options
+   * @param {{role:'streamer'|'viewer', sid?:string, cfg:object, send:(msg:object)=>Promise<unknown>,
+   *          micTrack:MediaStreamTrack|null, serverHost?:string}} options
+   *   serverHost — хост сигнального сервера из адреса подключения (у зрителя это белый IP стримера)
    */
-  constructor({ role, sid, cfg, send, micTrack }) {
+  constructor({ role, sid, cfg, send, micTrack, serverHost = '' }) {
     super();
     this.role = role;
+    this.serverHost = serverHost;
+    this.forwardRange = null; // диапазон проброшенных портов стримера (приходит в offer)
+    this.forwardedRemote = new Set();
+    this.startedAt = performance.now();
+    // Диагностика, не зависящая от статистики Chromium (она удаляет кандидатов после неудачи)
+    this.diag = { localSent: 0, remote: new Map(), rejected: [], stunErrors: new Set(), events: [] };
     this.sid = sid ?? crypto.randomUUID();
     this.cfg = cfg;
     this.sendRaw = send;
@@ -82,10 +100,22 @@ export class PeerSession extends EventTarget {
     this.pc.onicecandidate = (e) => this.onLocalCandidate(e.candidate);
     this.pc.ontrack = (e) => this.onTrack(e);
     this.pc.onconnectionstatechange = () => this.onConnectionState();
+    this.pc.oniceconnectionstatechange = () => this.logEvent(`ICE ${this.pc.iceConnectionState}`);
+    this.pc.onicegatheringstatechange = () => this.logEvent(`сбор ${this.pc.iceGatheringState}`);
+    // Ошибки STUN/TURN: почему не определился внешний адрес
+    this.pc.onicecandidateerror = (e) => {
+      if (this.diag.stunErrors.size < 6) this.diag.stunErrors.add(`${e.url}: ${e.errorCode} ${e.errorText}`.trim());
+    };
   }
 
   emit(type, detail) {
     this.dispatchEvent(new CustomEvent(type, { detail }));
+  }
+
+  logEvent(text) {
+    const t = ((performance.now() - this.startedAt) / 1000).toFixed(0);
+    this.diag.events.push(`${t} с: ${text}`);
+    if (this.diag.events.length > 14) this.diag.events.shift();
   }
 
   send(msg) {
@@ -119,11 +149,15 @@ export class PeerSession extends EventTarget {
     try {
       const offer = await this.pc.createOffer({ iceRestart });
       await this.pc.setLocalDescription(offer);
+      this.logEvent(iceRestart ? 'ICE restart, offer отправлен' : 'offer отправлен');
+      const { min, max } = this.cfg.network.udpPortRange;
       await this.send({
         kind: 'offer',
         sdp: this.pc.localDescription.sdp,
         codecOrder: this.codecOrder,
         live: Boolean(this.screenStream),
+        // Зрителю: эти порты проброшены на роутере — см. addForwardedRemote
+        forwardRange: min ? { min, max } : null,
       });
     } finally {
       this.makingOffer = false;
@@ -133,6 +167,7 @@ export class PeerSession extends EventTarget {
   async handleAnswer(msg) {
     if (this.pc.signalingState !== 'have-local-offer') return;
     await this.pc.setRemoteDescription({ type: 'answer', sdp: mungeRemoteSdp(msg.sdp, this.cfg, { sendsVideo: true }) });
+    this.logEvent('answer получен');
     this.remoteDescriptionSet = true;
     await this.flushCandidates();
     await this.applySenderParams();
@@ -181,7 +216,9 @@ export class PeerSession extends EventTarget {
   // ---------------- зритель ----------------
 
   async handleOffer(msg) {
+    this.forwardRange = msg.forwardRange ?? null;
     await this.pc.setRemoteDescription({ type: 'offer', sdp: mungeRemoteSdp(msg.sdp, this.cfg, { sendsVideo: false }) });
+    this.logEvent('offer получен');
     this.remoteDescriptionSet = true;
     await this.flushCandidates();
 
@@ -267,6 +304,8 @@ export class PeerSession extends EventTarget {
   }
 
   async addRemoteCandidate(init) {
+    const info = parseCandidate(init?.candidate);
+    if (info) this.diag.remote.set(describeCandidate(info), info);
     if (!this.remoteDescriptionSet) {
       this.pendingCandidates.push(init);
       return;
@@ -274,7 +313,37 @@ export class PeerSession extends EventTarget {
     try {
       await this.pc.addIceCandidate(init);
     } catch (err) {
+      this.diag.rejected.push(`${info ? describeCandidate(info) : init?.candidate}: ${err.message}`);
       console.warn('[ice] кандидат отклонён:', init?.candidate, err.message);
+      return;
+    }
+    if (this.role === 'viewer' && info) await this.addForwardedRemote(info, init);
+  }
+
+  /**
+   * Зритель: белый IP стримера — это адрес, по которому мы подключились к сигнальному серверу
+   * (сервер работает на ПК стримера за тем же пробросом портов). Поэтому для каждого host-кандидата
+   * стримера из проброшенного диапазона добавляем «адрес сервера : тот же порт». Это работает,
+   * даже если STUN стримера вернул чужой адрес (например, выход VPN) или не ответил вовсе.
+   */
+  async addForwardedRemote(info, init) {
+    const host = this.serverHost;
+    const range = this.forwardRange;
+    if (!range?.min || info.type !== 'host' || info.protocol !== 'udp') return;
+    if (!IPV4.test(host) || host.startsWith('127.') || host === info.address) return;
+    if (info.port < range.min || info.port > range.max) return;
+    const ufrag = init.usernameFragment ?? /ufrag (\S+)/.exec(init.candidate)?.[1];
+    const key = `${host}:${info.port}:${ufrag ?? ''}`;
+    if (this.forwardedRemote.has(key)) return;
+    this.forwardedRemote.add(key);
+    const line =
+      `candidate:duov${this.forwardedRemote.size} 1 udp ${FORWARDED_PRIORITY} ${host} ${info.port} ` +
+      `typ srflx raddr ${info.address} rport ${info.port} generation 0${ufrag ? ` ufrag ${ufrag}` : ''}`;
+    try {
+      await this.pc.addIceCandidate({ candidate: line, sdpMid: init.sdpMid, sdpMLineIndex: init.sdpMLineIndex, usernameFragment: ufrag });
+      this.diag.remote.set(`${describeCandidate(parseCandidate(line))} (адрес сервера)`, parseCandidate(line));
+    } catch (err) {
+      this.diag.rejected.push(`${host}:${info.port}: ${err.message}`);
     }
   }
 
@@ -290,6 +359,7 @@ export class PeerSession extends EventTarget {
       return;
     }
     if (!candidate.candidate) return;
+    this.diag.localSent++;
     this.announced.add(`${candidate.address}:${candidate.port}:${candidate.usernameFragment}`);
     this.send({ kind: 'candidate', candidate: candidate.toJSON() });
     if (this.role === 'streamer') this.announceForwardedPorts(candidate);
@@ -357,6 +427,7 @@ export class PeerSession extends EventTarget {
       return;
     }
     this.iceRestarts++;
+    this.logEvent(`восстановление, попытка ${this.iceRestarts}`);
     this.negotiate({ iceRestart: true }).catch((err) => console.warn('[ice] restart:', err));
   }
 

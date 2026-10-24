@@ -6,7 +6,7 @@ npm start            # запуск
 npm run start:viewer # второй экземпляр с отдельным профилем (проверка на одном ПК)
 npm run build:native # собрать native/bin/duostream-capture.exe (захват 120 FPS)
 npm run test:denoiser
-npm run dist         # установщик и portable-версия в dist/ (вместе с захватом)
+npm run dist         # DuoStream-Setup / portable exe в dist/ (захват, сервер — всё внутри)
 ```
 
 Полная инструкция — [../docs/01-install.md](../docs/01-install.md), параметры —

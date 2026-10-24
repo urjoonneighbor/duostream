@@ -1,10 +1,12 @@
 {
-  "_help": "Описание всех полей: docs/05-config.md. Файл можно править вручную (при закрытом приложении) или через окно «Настройки».",
+  "_help": "Шаблон настроек по умолчанию (попадает в сборку). Рабочий файл — stream.config.json рядом (при запуске из исходников) или %APPDATA%\\DuoStream\\stream.config.json; описание полей: docs/05-config.md.",
   "signaling": {
     "url": "ws://127.0.0.1:8787",
     "password": "",
     "role": "streamer",
-    "displayName": ""
+    "displayName": "",
+    "hostServer": true,
+    "serverPort": 8787
   },
   "video": {
     "width": 2560,

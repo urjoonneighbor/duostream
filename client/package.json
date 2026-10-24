@@ -12,7 +12,7 @@
     "build:native": "node scripts/build-native.mjs",
     "fetch-models": "node scripts/fetch-models.mjs",
     "test:denoiser": "node scripts/test-denoiser.mjs",
-    "dist": "npm run build:native && electron-builder --win nsis portable"
+    "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dist.ps1"
   },
   "devDependencies": {
     "electron": "^44.9.3",
@@ -28,10 +28,25 @@
     "directories": {
       "output": "dist"
     },
+    "electronDist": "node_modules/electron/dist",
     "files": [
       "src/**/*",
-      "config/**/*",
-      "package.json"
+      "config/stream.config.default.json",
+      "package.json",
+      {
+        "from": "../server/src",
+        "to": "server",
+        "filter": [
+          "*.js"
+        ]
+      },
+      {
+        "from": "../server",
+        "to": "server",
+        "filter": [
+          "package.json"
+        ]
+      }
     ],
     "extraResources": [
       {
@@ -50,7 +65,15 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "DuoStream",
+      "runAfterFinish": true,
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
     }
   },
   "dependencies": {

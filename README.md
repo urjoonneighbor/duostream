@@ -66,14 +66,15 @@ duostream/
 │  ├─ 03-static-ip.md            ← белый статический IP у провайдера
 │  ├─ 04-optional-turn.md        ← резервный TURN (coturn), необязательно
 │  └─ 05-config.md               ← описание всех параметров конфигурации
-├─ server/                       ← сигнальный сервер (Node.js + ws)
-│  ├─ config.json                ← порт и общий пароль
+├─ server/                       ← сигнальный сервер (Node.js + ws); тот же код встроен в приложение
+│  ├─ config.json                ← порт и общий пароль (для запуска отдельным процессом)
 │  ├─ src/server.js, src/crypto.js
 │  └─ test/server.test.js        ← npm test
 └─ client/                       ← десктопное приложение (Electron)
-   ├─ config/stream.config.json  ← настройки стрима: разрешение, FPS, битрейт, кодеки, звук, сеть
+   ├─ config/stream.config.default.json ← настройки по умолчанию: разрешение, FPS, битрейт, кодеки, звук, сеть
    ├─ native/capture/            ← собственный захват 120 FPS (C#, .NET 10) → native/bin/duostream-capture.exe
    ├─ src/main/                  ← главный процесс: флаги Chromium, порты, захват, конфиг
+   │  ├─ embedded-server.js      ← встроенный сигнальный сервер стримера
    │  └─ native-capture.js       ← запуск процесса захвата, импорт текстур (sharedTexture)
    ├─ src/preload/               ← мост main ↔ интерфейс
    ├─ src/renderer/
@@ -87,29 +88,29 @@ duostream/
    │  ├─ js/audio.js             ← микрофонный тракт
    │  ├─ audio/                  ← AudioWorklet + Web Worker + ядро DTLN (FFT, ресемплеры)
    │  └─ models/dtln/            ← ONNX-модели DTLN (MIT)
-   └─ scripts/                   ← copy-ort, build-native, fetch-models, test-denoiser
+   └─ scripts/                   ← dist (сборка exe), copy-ort, build-native, fetch-models, test-denoiser
 ```
 
 ## Быстрый старт
 
-Подробно — в [docs/01-install.md](docs/01-install.md). Коротко:
+Обычный способ — готовый `DuoStream.exe`: без консоли, Node.js, npm и .NET у пользователей.
 
-```powershell
-# ПК стримера: сервер (в config.json задайте "password" от 8 символов)
-cd server
-npm install
-npm start
-```
+1. **Собрать один раз** на любом ПК с Node.js и .NET SDK 10 (подробно — [docs/01-install.md](docs/01-install.md)):
 
-```powershell
-# Оба ПК: приложение (у стримера для 120 FPS нужен .NET SDK 10 — npm install сам соберёт захват)
-cd client
-npm install
-npm start
-```
+   ```powershell
+   cd client
+   npm install
+   npm run dist
+   ```
 
-Стример выбирает «Я стример», адрес `ws://127.0.0.1:8787`, пароль. Зритель — «Я зритель»,
-`ws://<белый IP стримера>:8787`, тот же пароль. Затем «Начать стрим» → экран или окно.
+   В `client/dist` появятся `DuoStream-Setup-1.0.0.exe` (установщик, ярлык на рабочем столе) и
+   `DuoStream-1.0.0-portable.exe` (один файл, без установки). Их и передайте второму участнику.
+2. **Стример** запускает DuoStream → «Я стример» (галочка «Запустить сигнальный сервер в приложении»
+   включена) → пароль → «Подключиться». Приложение покажет адрес для зрителя — передайте его и пароль.
+3. **Зритель** запускает DuoStream → «Я зритель» → адрес и пароль → «Подключиться».
+
+Настройки запоминаются, в следующий раз достаточно нажать «Подключиться». Один раз на роутере
+стримера нужен проброс портов: [docs/02-port-forwarding.md](docs/02-port-forwarding.md).
 
 ## Что проверено
 
@@ -133,6 +134,9 @@ npm start
 - Шумодав: на речи с шумом SI-SDR +8.4 дБ (SNR 5 дБ) и +10.7 дБ (SNR 0 дБ), шум в паузах −28 дБ,
   задержка 29 мс, в приложении ~1 мс CPU на 8 мс звука, без пропусков.
 - Порты WebRTC ограничены диапазоном 50000–50019; кандидат «белый IP : порт» доходит до зрителя и принимается.
+- **Собранный `DuoStream.exe`** (`npm run dist`): встроенный сервер поднимается из exe, зритель подключается,
+  P2P устанавливается, собственный захват из ресурсов сборки даёт ~116 FPS на AV1 NVENC, шумодав работает;
+  portable-версия запускается за ~3 с. В сборку попадает только шаблон настроек без пароля.
 
 ## Ограничения (честно)
 

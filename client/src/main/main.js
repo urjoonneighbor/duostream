@@ -17,7 +17,9 @@ const { EmbeddedServer } = require('./embedded-server');
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 const RENDERER_ROOT = path.join(APP_ROOT, 'src', 'renderer');
-const CONFIG_TEMPLATE = path.join(APP_ROOT, 'config', 'stream.config.json');
+// Шаблон по умолчанию (попадает в сборку) и рабочий файл при запуске из исходников (не в git)
+const CONFIG_TEMPLATE = path.join(APP_ROOT, 'config', 'stream.config.default.json');
+const DEV_CONFIG = path.join(APP_ROOT, 'config', 'stream.config.json');
 const APP_ORIGIN = 'app://local';
 
 // ---------- аргументы: --profile=<имя> (второй экземпляр на одном ПК), --config=<путь> ----------
@@ -37,7 +39,7 @@ function resolveConfigPath() {
   const explicit = argValue('config');
   if (explicit) return path.resolve(explicit);
   if (app.isPackaged || profile) return path.join(app.getPath('userData'), 'stream.config.json');
-  return CONFIG_TEMPLATE; // режим разработки: правим файл прямо в проекте
+  return DEV_CONFIG; // режим разработки: файл в проекте, создаётся из шаблона при первом запуске
 }
 
 // ---------- флаги Chromium (обязательно до app.ready) ----------

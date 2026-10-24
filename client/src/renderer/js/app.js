@@ -236,12 +236,19 @@ function teardown() {
 // ======================= WebRTC-сессия =======================
 
 function createSession(role, sid) {
+  let serverHost = '';
+  try {
+    serverHost = new URL(state.signaling?.url ?? '').hostname;
+  } catch {
+    // адрес уже проверен при подключении
+  }
   const session = new PeerSession({
     role,
     sid,
     cfg: state.cfg,
     send: (msg) => state.signaling?.sendSignal(msg) ?? Promise.resolve(false),
     micTrack: state.mic?.track ?? null,
+    serverHost,
   });
   session.addEventListener('track', onRemoteTrack);
   session.addEventListener('state', (e) => onPeerState(session, e.detail.state));
@@ -718,7 +725,7 @@ function renderQuality(stats) {
     } else if (state.session) {
       // P2P ещё не установлено — показываем, на каком шаге застряли
       const session = state.session;
-      describeIce(session.pc)
+      describeIce(session)
         .then((rows) => {
           if (state.hudOpen && state.session === session && !state.stats) {
             renderList($('#hudList'), [['P2P', 'ещё не установлено'], ...rows]);
