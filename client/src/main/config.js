@@ -29,11 +29,24 @@ const DEFAULTS = Object.freeze({
     micDeviceId: 'default',
     outputDeviceId: 'default',
     noiseSuppression: true,
+    denoiseModel: 'dfn3',
+    denoiseLimitDb: 0,
+    voiceGate: true,
     echoCancellation: true,
     autoGainControl: true,
     voiceBitrateKbps: 64,
     captureSystemAudio: false,
     systemAudioBitrateKbps: 160,
+    pushToTalk: false,
+    pushToTalkReleaseMs: 150,
+  },
+  // Глобальные горячие клавиши (src/main/hotkeys.js); null — не назначено. Коды — uiohook.
+  hotkeys: {
+    toggleMute: { key: 50, ctrl: true, shift: true, alt: false, meta: false, label: 'Ctrl + Shift + M' },
+    toggleDeafen: { key: 32, ctrl: true, shift: true, alt: false, meta: false, label: 'Ctrl + Shift + D' },
+    pushToTalk: null,
+    toggleDenoise: null,
+    toggleStream: null,
   },
   network: {
     iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }],
@@ -44,6 +57,9 @@ const DEFAULTS = Object.freeze({
   },
   playback: {
     jitterBufferTargetMs: 0,
+  },
+  app: {
+    autoUpdate: true, // проверять обновления на GitHub (src/main/updater.js)
   },
 });
 
@@ -84,9 +100,30 @@ function sanitizeIceServers(list) {
     .filter((s) => s.urls.length > 0);
 }
 
+function sanitizeBinding(b) {
+  if (!isPlainObject(b)) return null;
+  const out = { ctrl: b.ctrl === true, shift: b.shift === true, alt: b.alt === true, meta: b.meta === true };
+  if (Number.isInteger(b.mouse) && b.mouse >= 3 && b.mouse <= 8) out.mouse = b.mouse;
+  else if (Number.isInteger(b.key) && b.key > 0 && b.key <= 0xffff) out.key = b.key;
+  else return null;
+  out.label = str(b.label).slice(0, 64) || (out.mouse ? `Мышь ${out.mouse}` : `Клавиша ${out.key}`);
+  return out;
+}
+
+/** deepMerge не годится: null («не назначено») не должен заменяться привязкой по умолчанию */
+function sanitizeHotkeys(input) {
+  const src = isPlainObject(input) ? input : {};
+  const out = {};
+  for (const [action, fallback] of Object.entries(DEFAULTS.hotkeys)) {
+    out[action] = action in src ? sanitizeBinding(src[action]) : structuredClone(fallback);
+  }
+  return out;
+}
+
 function sanitize(input) {
   const d = DEFAULTS;
   const c = deepMerge(d, input);
+  c.hotkeys = sanitizeHotkeys(isPlainObject(input) ? input.hotkeys : undefined);
 
   c.signaling.url = str(c.signaling.url, d.signaling.url) || d.signaling.url;
   c.signaling.password = typeof c.signaling.password === 'string' ? c.signaling.password : '';
@@ -122,11 +159,17 @@ function sanitize(input) {
   a.micDeviceId = str(a.micDeviceId, 'default') || 'default';
   a.outputDeviceId = str(a.outputDeviceId, 'default') || 'default';
   a.noiseSuppression = bool(a.noiseSuppression, d.audio.noiseSuppression);
+  a.denoiseModel = oneOf(a.denoiseModel, ['dfn3', 'dtln'], d.audio.denoiseModel);
+  a.denoiseLimitDb = clampInt(a.denoiseLimitDb, 0, 100, d.audio.denoiseLimitDb);
+  a.voiceGate = bool(a.voiceGate, d.audio.voiceGate);
   a.echoCancellation = bool(a.echoCancellation, d.audio.echoCancellation);
   a.autoGainControl = bool(a.autoGainControl, d.audio.autoGainControl);
   a.voiceBitrateKbps = clampInt(a.voiceBitrateKbps, 16, 256, d.audio.voiceBitrateKbps);
   a.captureSystemAudio = bool(a.captureSystemAudio, d.audio.captureSystemAudio);
   a.systemAudioBitrateKbps = clampInt(a.systemAudioBitrateKbps, 32, 510, d.audio.systemAudioBitrateKbps);
+  // Режим рации: микрофон передаётся, только пока зажата клавиша hotkeys.pushToTalk
+  a.pushToTalk = bool(a.pushToTalk, d.audio.pushToTalk);
+  a.pushToTalkReleaseMs = clampInt(a.pushToTalkReleaseMs, 0, 2000, d.audio.pushToTalkReleaseMs);
 
   const n = c.network;
   n.iceServers = sanitizeIceServers(n.iceServers);
@@ -144,6 +187,7 @@ function sanitize(input) {
   n.forceRelay = bool(n.forceRelay, false);
 
   c.playback.jitterBufferTargetMs = clampInt(c.playback.jitterBufferTargetMs, 0, 4000, 0);
+  c.app.autoUpdate = bool(c.app.autoUpdate, d.app.autoUpdate);
   return c;
 }
 

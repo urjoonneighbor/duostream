@@ -6,7 +6,9 @@
  *  - фиксирует диапазон UDP-портов WebRTC, чтобы его можно было пробросить на роутере;
  *  - отдаёт интерфейс по собственному протоколу app://local (нужен для module worker и wasm);
  *  - выбирает источник захвата экрана/окна и системный звук (loopback) для getDisplayMedia;
- *  - читает/пишет stream.config.json.
+ *  - читает/пишет stream.config.json;
+ *  - глобальные горячие клавиши (src/main/hotkeys.js) пересылает интерфейсу;
+ *  - обновляется из GitHub Releases (src/main/updater.js).
  */
 const { app, BrowserWindow, desktopCapturer, ipcMain, net, protocol, session, shell, Menu } = require('electron');
 const fs = require('node:fs');
@@ -14,6 +16,8 @@ const path = require('node:path');
 const { loadConfig, saveConfig } = require('./config');
 const { NativeCapture } = require('./native-capture');
 const { EmbeddedServer } = require('./embedded-server');
+const { Hotkeys } = require('./hotkeys');
+const { Updater } = require('./updater');
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 const RENDERER_ROOT = path.join(APP_ROOT, 'src', 'renderer');
@@ -102,6 +106,11 @@ let current = { config: null, error: null };
 let pendingCapture = null;
 const nativeCapture = new NativeCapture();
 const embeddedServer = new EmbeddedServer();
+const sendToWindow = (channel, payload) => {
+  if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(channel, payload);
+};
+const hotkeys = new Hotkeys((action, phase) => sendToWindow('hotkey', { action, phase }));
+const updater = new Updater((state) => sendToWindow('update', state));
 
 function registerAppProtocol() {
   protocol.handle('app', async (request) => {
@@ -185,7 +194,39 @@ function registerIpc() {
     if (!isTrustedSender(event)) throw new Error('forbidden');
     current = { config: saveConfig(configPath, cfg), error: null };
     if (mainWindow) applyNetworkPolicy(mainWindow.webContents);
+    hotkeys.update(current.config.hotkeys);
+    updater.configure(current.config.app.autoUpdate);
     return current.config;
+  });
+
+  ipcMain.handle('update:status', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return updater.status();
+  });
+
+  ipcMain.handle('update:install', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    updater.install();
+  });
+
+  // Назначение горячей клавиши: следующее нажатие (в любом окне) становится привязкой
+  ipcMain.handle('hotkeys:record', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return hotkeys.record();
+  });
+
+  ipcMain.handle('hotkeys:cancel', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    hotkeys.cancelRecord();
+  });
+
+  // Горячая клавиша трансляции: показать окно, чтобы выбрать экран
+  ipcMain.handle('app:focus', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   });
 
   ipcMain.handle('config:open', async (event) => {
@@ -290,6 +331,8 @@ function registerIpc() {
       gpuFeatures: app.getGPUFeatureStatus(),
       udpPortRange: mainWindow?.webContents.getWebRTCUDPPortRange(),
       nativeCapture: nativeCapture.status(),
+      hotkeys: hotkeys.status(),
+      update: updater.status(),
       profile: profile ?? null,
     };
   });
@@ -351,10 +394,18 @@ app.whenReady().then(() => {
   setupPermissions();
   registerIpc();
   createWindow();
+  try {
+    hotkeys.update(current.config.hotkeys);
+  } catch (err) {
+    console.error('[hotkeys]', err);
+  }
+  // Проверка обновлений — когда окно уже загрузилось и может показать уведомление
+  mainWindow.webContents.once('did-finish-load', () => updater.configure(current.config.app.autoUpdate));
 });
 
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
+  hotkeys.stop();
   nativeCapture.stop();
   embeddedServer.stop();
 });

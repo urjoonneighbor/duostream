@@ -9,6 +9,10 @@ const ICONS = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   leave: '<path d="M15 4h4v16h-4M10 8l-4 4 4 4M6 12h10"/>',
   wave: '<path d="M2 12h3l2-6 3 12 3-9 2 5 2-2h5"/>',
+  headphones:
+    '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/>',
+  headphonesOff:
+    '<path d="M4 15v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="14" width="4" height="6" rx="1.5"/><rect x="17" y="14" width="4" height="6" rx="1.5"/><path d="M3 3l18 18"/>',
   sliders:
     '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
   fullscreen: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
@@ -29,12 +33,36 @@ export function setIcon(el, name) {
 }
 
 /** @param {'info'|'ok'|'warn'|'error'} type */
-export function toast(message, type = 'info', ms = 4500) {
+/**
+ * @param {number} ms 0 — висит, пока не нажмут кнопку или ✕
+ * @param {{label:string, onClick:()=>void}} [action] кнопка в уведомлении
+ */
+export function toast(message, type = 'info', ms = 4500, action = null) {
   const el = document.createElement('div');
   el.className = `toast ${type}`;
   el.textContent = message;
+  if (action || !ms) {
+    const buttons = document.createElement('div');
+    buttons.className = 'toast-actions';
+    if (action) {
+      const button = document.createElement('button');
+      button.textContent = action.label;
+      button.addEventListener('click', () => {
+        el.remove();
+        action.onClick();
+      });
+      buttons.append(button);
+    }
+    const close = document.createElement('button');
+    close.className = 'ghost';
+    close.textContent = '✕';
+    close.title = 'Закрыть';
+    close.addEventListener('click', () => el.remove());
+    buttons.append(close);
+    el.append(buttons);
+  }
   $('#toasts').append(el);
-  setTimeout(() => el.remove(), ms);
+  if (ms) setTimeout(() => el.remove(), ms);
   (type === 'error' ? console.error : console.log)(`[toast] ${message}`);
 }
 

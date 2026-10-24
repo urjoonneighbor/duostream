@@ -1,0 +1,70 @@
+# Деплой DuoStream: каждый пуш в master собирает установщик и portable-версию и публикует их
+# в GitHub Releases с тегом v<major>.<minor>.<номер запуска> (major.minor — из client/package.json).
+# Установленные копии приложения сами находят новую версию и ставят её при выходе (client/src/main/updater.js).
+# Запустить вручную: Actions → Release → Run workflow.
+name: Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write # создание релиза и загрузка файлов токеном GITHUB_TOKEN
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            client/package-lock.json
+            server/package-lock.json
+
+      # Собственный захват экрана (client/native/capture) — C#, .NET 10
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Тесты сигнального сервера
+        working-directory: server
+        run: |
+          npm ci
+          npm test
+
+      - name: Зависимости клиента
+        working-directory: client
+        run: npm ci
+
+      - name: Проверка шумодава (DeepFilterNet3 и DTLN)
+        working-directory: client
+        run: |
+          node scripts/test-denoiser.mjs --model=dfn3
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node scripts/test-denoiser.mjs --model=dtln
+
+      - name: Сборка и публикация
+        working-directory: client
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          $major, $minor = $pkg.version.Split('.')[0..1]
+          $version = "$major.$minor.${{ github.run_number }}"
+          npm version $version --no-git-tag-version --allow-same-version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Write-Host "Версия $version"
+          ./scripts/dist.ps1 -Publish

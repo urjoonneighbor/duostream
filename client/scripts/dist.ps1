@@ -4,6 +4,9 @@
 #  3. скачивает инструменты electron-builder (7-Zip, NSIS) через PowerShell с проверкой SHA-256 —
 #     загрузка из Node с GitHub на некоторых сетях обрывается (RequestError) — и кладёт их в build-tools/;
 #  4. запускает electron-builder. Результат — в dist/.
+# С ключом -Publish (так вызывает .github/workflows/release.yml) сборка ещё и публикуется в GitHub
+# Releases — нужен токен в GH_TOKEN. Без ключа ничего никуда не отправляется.
+param([switch]$Publish)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $tools = Join-Path $root 'build-tools'
@@ -41,5 +44,5 @@ $env:ELECTRON_BUILDER_7ZIP_PATH = $sevenZip
 $env:ELECTRON_BUILDER_NSIS_DIR = Get-Tool $assets.nsis $sevenZip
 $env:ELECTRON_BUILDER_NSIS_RESOURCES_DIR = Get-Tool $assets.nsisResources $sevenZip
 
-npx electron-builder --win nsis portable
+npx electron-builder --win nsis portable --publish $(if ($Publish) { 'always' } else { 'never' })
 exit $LASTEXITCODE

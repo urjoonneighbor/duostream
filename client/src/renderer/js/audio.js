@@ -1,5 +1,8 @@
-// Микрофонный тракт: getUserMedia → AudioWorklet (шумодав DTLN/ONNX) → MediaStreamTrack для WebRTC.
-// Трек на выходе постоянный: смена микрофона или вкл/выкл шумодава не требуют пересогласования.
+// Микрофонный тракт: getUserMedia → AudioWorklet (шумодав DeepFilterNet3 или DTLN на ONNX Runtime)
+// → MediaStreamTrack для WebRTC. Трек на выходе постоянный: смена микрофона, модели или вкл/выкл
+// шумодава не требуют пересогласования.
+
+export const DENOISE_MODELS = { dfn3: 'DeepFilterNet3', dtln: 'DTLN' };
 
 export class MicPipeline extends EventTarget {
   constructor() {
@@ -11,7 +14,10 @@ export class MicPipeline extends EventTarget {
     /** 'loading' | 'ready' | 'error' */
     this.denoiseEngine = 'loading';
     this.denoiseError = '';
-    this.perf = { avgMs: 0, maxMs: 0, dropped: 0, underruns: 0 };
+    this.denoiseWarning = ''; // например, DeepFilterNet3 не загрузился и работает DTLN
+    this.model = null; // загруженная модель: 'dfn3' | 'dtln'
+    this.frame = 0; // размер кадра модели, отсчётов 48 кГц
+    this.perf = { avgMs: 0, maxMs: 0, dropped: 0, underruns: 0, gateOpen: 0 };
   }
 
   /** @param {object} audioCfg раздел audio из stream.config.json */
@@ -51,14 +57,19 @@ export class MicPipeline extends EventTarget {
     this.worker.onmessage = (event) => {
       const msg = event.data;
       if (msg.type === 'ready') {
-        this.denoiseEngine = 'ready';
+        Object.assign(this, { denoiseEngine: 'ready', model: msg.model, frame: msg.frame, denoiseWarning: msg.warning });
         this.applyDenoise();
       } else if (msg.type === 'error') {
         this.denoiseEngine = 'error';
         this.denoiseError = msg.message;
         this.applyDenoise();
       } else if (msg.type === 'stats') {
-        Object.assign(this.perf, { avgMs: msg.avgMs, maxMs: msg.maxMs, dropped: this.perf.dropped + msg.dropped });
+        Object.assign(this.perf, {
+          avgMs: msg.avgMs,
+          maxMs: msg.maxMs,
+          dropped: this.perf.dropped + msg.dropped,
+          gateOpen: msg.gateOpen,
+        });
       }
     };
     this.worker.onerror = (event) => {
@@ -66,7 +77,8 @@ export class MicPipeline extends EventTarget {
       this.denoiseError = event.message || 'не удалось запустить воркер';
       this.applyDenoise();
     };
-    this.worker.postMessage({ type: 'init', port: channel.port1 }, [channel.port1]);
+    const { denoiseModel: model, denoiseLimitDb: limitDb, voiceGate: gate } = this.cfg;
+    this.worker.postMessage({ type: 'init', port: channel.port1, model, limitDb, gate }, [channel.port1]);
     this.node.port.postMessage({ type: 'worker-port', port: channel.port2 }, [channel.port2]);
   }
 
@@ -101,6 +113,14 @@ export class MicPipeline extends EventTarget {
     ) {
       await this.openMic();
     }
+    if (prev.denoiseLimitDb !== audioCfg.denoiseLimitDb || prev.voiceGate !== audioCfg.voiceGate) {
+      this.worker.postMessage({ type: 'options', limitDb: audioCfg.denoiseLimitDb, gate: audioCfg.voiceGate });
+    }
+    if (prev.denoiseModel !== audioCfg.denoiseModel) {
+      // Пока грузится другая модель, голос идёт без шумодава (worklet пропускает звук насквозь)
+      this.denoiseEngine = 'loading';
+      this.worker.postMessage({ type: 'model', model: audioCfg.denoiseModel });
+    }
     this.setDenoise(audioCfg.noiseSuppression);
   }
 
@@ -110,7 +130,8 @@ export class MicPipeline extends EventTarget {
   }
 
   applyDenoise() {
-    this.node?.port.postMessage({ type: 'enable', value: this.denoiseWanted && this.denoiseEngine === 'ready' });
+    const value = this.denoiseWanted && this.denoiseEngine === 'ready';
+    this.node?.port.postMessage({ type: 'enable', value, frame: this.frame });
     this.dispatchEvent(new Event('change'));
   }
 

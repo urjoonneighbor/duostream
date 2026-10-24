@@ -2,13 +2,14 @@
 // захват экрана, микрофон с шумодавом, индикатор качества и настройки.
 import { SignalingClient } from './signaling.js';
 import { PeerSession } from './peer.js';
-import { MicPipeline } from './audio.js';
+import { MicPipeline, DENOISE_MODELS } from './audio.js';
 import { probeVideoCodecs, orderCodecs } from './codecs.js';
 import { StatsMonitor, describeStats, describeIce, formatKbps, formatPath } from './stats.js';
 import { openSourcePicker } from './picker.js';
 import { NativeCaptureTrack, nativeCaptureStatus } from './native-capture.js';
 import { SettingsDialog } from './settings.js';
 import { $, toast, renderIcons, setIcon, renderList } from './ui.js';
+import { playCue } from './tones.js';
 
 const ROLE_NAME = { streamer: 'Стример', viewer: 'Зритель' };
 const FATAL_CODES = new Set(['auth-failed', 'banned', 'replaced', 'bad-version', 'bad-role']);
@@ -29,6 +30,7 @@ const state = {
   stats: null,
   mic: null,
   denoiseErrorShown: false,
+  denoiseWarningShown: '',
   screen: null, // MediaStream захвата экрана (стример)
   capture: null, // {engine:'native'|'chromium', native, width, height, scale}
   hostedServer: null, // встроенный сигнальный сервер стримера: {port, own}
@@ -46,6 +48,11 @@ const state = {
   lastEncoderRestart: 0, // когда последний раз пересоздавали сессию из-за ухода энкодера на CPU
   pathAnnounced: false,
   hudOpen: false,
+  micMuted: false, // микрофон выключен кнопкой или горячей клавишей
+  deafened: false, // звук собеседника выключен (и микрофон вместе с ним)
+  pttHeld: false, // режим рации: клавиша зажата
+  pttTimer: 0,
+  updateShown: null, // версия, о которой уже показали уведомление
   outputs: new Map(), // deviceId → название устройства вывода звука
   voicePeakDb: -Infinity, // максимум уровня голоса собеседника с прошлого тика статистики
   voiceDb: -Infinity, // то же за последнюю завершённую секунду (для окна статистики)
@@ -668,11 +675,16 @@ async function ensureMic() {
       state.denoiseErrorShown = true;
       toast(`Шумодав не загрузился: ${mic.denoiseError}. Голос идёт без шумоподавления.`, 'error', 10000);
     }
+    if (mic.denoiseWarning && mic.denoiseWarning !== state.denoiseWarningShown) {
+      state.denoiseWarningShown = mic.denoiseWarning;
+      toast(mic.denoiseWarning, 'warn', 10000);
+    }
     render();
   });
   try {
     await mic.start(state.cfg.audio);
     state.mic = mic;
+    applyVoiceState(); // выключенный микрофон и режим рации переживают переподключение
     refreshOutputs(); // после разрешения на микрофон у устройств появляются названия
   } catch (err) {
     mic.stop();
@@ -680,9 +692,99 @@ async function ensureMic() {
   }
 }
 
+// ======================= микрофон, звук, рация =======================
+
+/** Режим рации включён и клавиша назначена */
+const pushToTalk = () => state.cfg.audio.pushToTalk && Boolean(state.cfg.hotkeys.pushToTalk);
+
+/** Микрофон передаётся: не выключен, звук не выключен, а в режиме рации ещё и зажата клавиша */
+function applyVoiceState() {
+  const transmit = !state.micMuted && !state.deafened && (!pushToTalk() || state.pttHeld);
+  state.mic?.setMuted(!transmit);
+  $('#voiceAudio').muted = state.deafened;
+  $('#systemAudio').muted = state.deafened;
+  render();
+}
+
+/** Как в Discord: включение микрофона при выключенном звуке включает и звук */
 function toggleMic() {
-  if (!state.mic) return;
-  state.mic.setMuted(!state.mic.muted);
+  if (state.deafened) Object.assign(state, { deafened: false, micMuted: false });
+  else state.micMuted = !state.micMuted;
+  applyVoiceState();
+}
+
+function toggleDeafen() {
+  state.deafened = !state.deafened;
+  applyVoiceState();
+}
+
+// ======================= обновления =======================
+
+function onUpdateState(update) {
+  if (state.updateShown === update.version) return;
+  if (update.status === 'ready') {
+    state.updateShown = update.version;
+    toast(`Скачано обновление ${update.version}. Установится, когда вы закроете DuoStream.`, 'ok', 0, {
+      label: 'Перезапустить сейчас',
+      onClick: () => window.duo.update.install(),
+    });
+  } else if (update.status === 'available') {
+    state.updateShown = update.version;
+    toast(`Вышла версия ${update.version} (у вас ${update.current}). Portable-версия сама не обновляется.`, 'info', 0, {
+      label: 'Скачать',
+      onClick: () => window.duo.update.install(),
+    });
+  }
+}
+
+function describeUpdate(u) {
+  const status = {
+    dev: 'не проверяются при запуске из исходников',
+    off: 'проверка выключена в настройках',
+    idle: 'ещё не проверялись',
+    checking: 'проверка…',
+    latest: 'установлена последняя',
+    downloading: `скачивается ${u.version}: ${u.percent ?? 0}%`,
+    ready: `${u.version} скачана, установится при выходе`,
+    available: `вышла ${u.version} — ${u.url}`,
+    error: `ошибка проверки: ${u.error}`,
+  }[u.status];
+  return `версия ${u.current}${u.portable ? ' (portable)' : ''} · ${status ?? u.status}`;
+}
+
+function onHotkey({ action, phase }) {
+  const cue = (kind) => playCue(kind, state.cfg.audio.outputDeviceId);
+  if (action === 'pushToTalk') {
+    clearTimeout(state.pttTimer);
+    if (phase === 'down') {
+      state.pttHeld = true;
+      applyVoiceState();
+    } else {
+      state.pttTimer = setTimeout(() => {
+        state.pttHeld = false;
+        applyVoiceState();
+      }, state.cfg.audio.pushToTalkReleaseMs);
+    }
+    return;
+  }
+  if (phase !== 'down') return;
+  if (action === 'toggleMute') {
+    toggleMic();
+    cue(state.micMuted ? 'off' : 'on');
+  } else if (action === 'toggleDeafen') {
+    toggleDeafen();
+    cue(state.deafened ? 'deafen' : 'undeafen');
+  } else if (action === 'toggleDenoise' && state.mic) {
+    toggleDenoise().then(() => cue(state.mic?.denoiseWanted ? 'on' : 'off'));
+  } else if (action === 'toggleStream' && state.role === 'streamer' && state.signaling) {
+    if (state.screen) {
+      stopStream();
+      cue('off');
+    } else {
+      // Источник выбирается в окне — показываем его поверх игры
+      window.duo.focusWindow().then(startStream);
+    }
+  }
 }
 
 async function toggleDenoise() {
@@ -700,7 +802,12 @@ function denoiseSummary() {
   if (s === 'loading') return 'загрузка модели…';
   if (s === 'error') return `ошибка: ${mic.denoiseError}`;
   const p = mic.perf;
-  return `DTLN · ${p.avgMs.toFixed(2)} мс на кадр 8 мс (макс ${p.maxMs.toFixed(1)}), пропусков ${p.underruns + p.dropped}`;
+  const frameMs = (mic.frame / 48000) * 1000;
+  const gate = mic.model === 'dfn3' && state.cfg.audio.voiceGate ? `, порог открыт ${Math.round(p.gateOpen * 100)}% времени` : '';
+  return (
+    `${DENOISE_MODELS[mic.model] ?? mic.model} · ${p.avgMs.toFixed(2)} мс на кадр ${frameMs} мс ` +
+    `(макс ${p.maxMs.toFixed(1)}), пропусков ${p.underruns + p.dropped}${gate}`
+  );
 }
 
 /** Шкала индикатора: −60…0 дБ → 0…1, как у индикатора микрофона */
@@ -838,7 +945,7 @@ async function saveSettings(next) {
     }
   }
   toast('Настройки сохранены', 'ok', 2500);
-  render();
+  applyVoiceState(); // режим рации мог включиться или выключиться
 }
 
 async function collectDiagnostics() {
@@ -881,6 +988,8 @@ async function collectDiagnostics() {
   ]);
   const range = info.udpPortRange;
   rows.push(['UDP-порты WebRTC', range?.min ? `${range.min}–${range.max}` : 'без ограничений']);
+  rows.push(['Глобальные клавиши', info.hotkeys.available ? 'работают' : `недоступны: ${info.hotkeys.error}`]);
+  rows.push(['Обновления', describeUpdate(info.update)]);
   if (state.mic) rows.push(['Микрофон', state.mic.deviceLabel || '—'], ['Шумодав', denoiseSummary()]);
   await refreshOutputs();
   rows.push(['Вывод звука', outputLabel()]);
@@ -977,10 +1086,23 @@ function render() {
   $('#btnDisconnect').hidden = !connected;
 
   const mic = state.mic;
+  const keys = state.cfg.hotkeys;
+  const keyHint = (action, fallback = '') => (keys[action] ? ` (${keys[action].label})` : fallback);
+  const micOn = Boolean(mic) && !state.micMuted && !state.deafened;
   const micBtn = $('#btnMic');
   micBtn.disabled = !mic;
-  micBtn.setAttribute('aria-pressed', String(Boolean(mic) && !mic.muted));
-  setIcon(micBtn.querySelector('i'), mic && !mic.muted ? 'mic' : 'micOff');
+  micBtn.setAttribute('aria-pressed', String(micOn));
+  // Рация: микрофон включён, но передаёт, только пока клавиша зажата
+  micBtn.dataset.ptt = micOn && pushToTalk() ? (state.pttHeld ? 'talking' : 'idle') : '';
+  micBtn.title = pushToTalk()
+    ? `Рация: говорите, удерживая ${keys.pushToTalk.label}. Кнопка — выключить микрофон совсем`
+    : `Микрофон${keyHint('toggleMute', ' (Ctrl+M)')}`;
+  setIcon(micBtn.querySelector('i'), micOn ? 'mic' : 'micOff');
+
+  const deafenBtn = $('#btnDeafen');
+  deafenBtn.setAttribute('aria-pressed', String(!state.deafened));
+  deafenBtn.title = `${state.deafened ? 'Звук выключен — включить' : 'Выключить звук собеседника'}${keyHint('toggleDeafen')}`;
+  setIcon(deafenBtn.querySelector('i'), state.deafened ? 'headphonesOff' : 'headphones');
 
   const denoiseBtn = $('#btnDenoise');
   const ds = mic?.denoiseState ?? 'off';
@@ -1036,6 +1158,9 @@ function bindEvents() {
   $('#btnStream').addEventListener('click', () => (state.screen ? stopStream() : startStream()));
   $('#btnDisconnect').addEventListener('click', disconnect);
   $('#btnMic').addEventListener('click', toggleMic);
+  $('#btnDeafen').addEventListener('click', toggleDeafen);
+  window.duo.hotkeys.onAction(onHotkey);
+  window.duo.update.onState(onUpdateState);
   $('#btnDenoise').addEventListener('click', toggleDenoise);
   $('#btnQuality').addEventListener('click', () => {
     state.hudOpen = !state.hudOpen;

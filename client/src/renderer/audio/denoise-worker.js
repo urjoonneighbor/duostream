@@ -1,45 +1,87 @@
-// Web Worker шумодава: ONNX Runtime (WASM) + DTLN. Кадры приходят напрямую из AudioWorklet
-// через MessagePort (минуя главный поток) и уходят обратно тем же путём.
+// Web Worker шумодава: ONNX Runtime (WASM) + DeepFilterNet3 (48 кГц) или DTLN (16 кГц).
+// Кадры приходят напрямую из AudioWorklet через MessagePort (минуя главный поток)
+// и уходят обратно тем же путём.
 import * as ort from '../vendor/ort/ort.wasm.min.mjs';
 import { DtlnEngine, Denoiser48k, FRAME_48K } from './dtln-core.js';
+import { DfnDenoiser, DFN_FRAME, VoiceGate } from './dfn-core.js';
 
-ort.env.wasm.numThreads = 1; // модель крошечная, потоки и SharedArrayBuffer не нужны
+ort.env.wasm.numThreads = 1; // кадр 10 мс считается за ~2 мс — потоки и SharedArrayBuffer не нужны
 ort.env.wasm.proxy = false;
 ort.env.wasm.wasmPaths = new URL('../vendor/ort/', import.meta.url).href;
 
-const MAX_QUEUE = 12; // ~100 мс; если воркер не успевает, старые кадры выбрасываются
+const MAX_QUEUE_MS = 100; // если воркер не успевает, старые кадры выбрасываются
 
-let denoiser = null;
+/** model → () => Promise<{frame, denoiser}> */
+const MODELS = {
+  dfn3: async () => ({
+    frame: DFN_FRAME,
+    denoiser: await DfnDenoiser.create(ort, await loadModel('dfn3/denoiser_model.onnx')),
+  }),
+  dtln: async () => {
+    const [m1, m2] = await Promise.all([loadModel('dtln/model_1.onnx'), loadModel('dtln/model_2.onnx')]);
+    return { frame: FRAME_48K, denoiser: new Denoiser48k(await DtlnEngine.create(ort, m1, m2)) };
+  },
+};
+
+const loaded = new Map(); // уже загруженные модели: переключение туда-обратно без повторной загрузки
+let engine = null; // {model, frame, denoiser}
+let options = { limitDb: 0, gate: true };
+const gate = new VoiceGate();
+let loadToken = 0;
 let port = null;
 let busy = false;
 const queue = [];
-let stats = { frames: 0, totalMs: 0, maxMs: 0, dropped: 0 };
+let stats = { frames: 0, totalMs: 0, maxMs: 0, dropped: 0, gateOpen: 0 };
 
 async function loadModel(name) {
-  const response = await fetch(new URL(`../models/dtln/${name}`, import.meta.url));
+  const response = await fetch(new URL(`../models/${name}`, import.meta.url));
   if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
   return response.arrayBuffer();
 }
 
-async function init(workletPort) {
-  port = workletPort;
-  port.onmessage = onWorkletMessage;
-  try {
-    const [m1, m2] = await Promise.all([loadModel('model_1.onnx'), loadModel('model_2.onnx')]);
-    denoiser = new Denoiser48k(await DtlnEngine.create(ort, m1, m2));
+async function load(model) {
+  if (!loaded.has(model)) {
+    const instance = await MODELS[model]();
     // Прогрев: первый прогон сессии заметно медленнее последующих
-    await denoiser.process(new Float32Array(FRAME_48K));
-    denoiser.reset();
-    self.postMessage({ type: 'ready' });
-  } catch (err) {
-    self.postMessage({ type: 'error', message: String(err?.message ?? err) });
+    await instance.denoiser.process(new Float32Array(instance.frame));
+    loaded.set(model, instance);
   }
+  return loaded.get(model);
+}
+
+async function selectModel(requested) {
+  const token = ++loadToken;
+  engine = null;
+  queue.length = 0;
+  let model = MODELS[requested] ? requested : 'dfn3';
+  let warning = '';
+  let instance;
+  try {
+    instance = await load(model);
+  } catch (err) {
+    if (model !== 'dfn3') throw err;
+    // DeepFilterNet3 не загрузился (нет файла модели, мало памяти) — лёгкая модель лучше, чем ничего
+    warning = `DeepFilterNet3 не загрузился (${err?.message ?? err}), работает DTLN`;
+    model = 'dtln';
+    instance = await load(model);
+  }
+  if (token !== loadToken) return;
+  instance.denoiser.reset();
+  gate.reset();
+  engine = { model, ...instance };
+  applyOptions();
+  self.postMessage({ type: 'ready', model, frame: instance.frame, warning });
+}
+
+function applyOptions() {
+  if (engine?.model === 'dfn3') engine.denoiser.setAttenuationLimit(options.limitDb);
 }
 
 function onWorkletMessage(event) {
   const msg = event.data;
   if (msg.type === 'frame') {
-    if (queue.length >= MAX_QUEUE) {
+    if (!engine || msg.data.length !== engine.frame) return; // кадр от прежней модели при переключении
+    if (queue.length * engine.frame >= (MAX_QUEUE_MS / 1000) * 48000) {
       queue.shift();
       stats.dropped++;
     }
@@ -47,18 +89,24 @@ function onWorkletMessage(event) {
     drain();
   } else if (msg.type === 'reset') {
     queue.length = 0;
-    denoiser?.reset();
+    engine?.denoiser.reset();
+    gate.reset();
   }
 }
 
 async function drain() {
-  if (busy || !denoiser) return;
+  if (busy || !engine) return;
   busy = true;
   try {
-    while (queue.length) {
+    while (queue.length && engine) {
+      const { model, denoiser } = engine;
       const frame = queue.shift();
       const started = performance.now();
       const out = await denoiser.process(frame);
+      if (model === 'dfn3' && options.gate) {
+        gate.process(out, denoiser.lsnr);
+        if (gate.open) stats.gateOpen++;
+      }
       const ms = performance.now() - started;
       stats.frames++;
       stats.totalMs += ms;
@@ -74,10 +122,27 @@ async function drain() {
 
 setInterval(() => {
   if (!stats.frames) return;
-  self.postMessage({ type: 'stats', avgMs: stats.totalMs / stats.frames, maxMs: stats.maxMs, dropped: stats.dropped });
-  stats = { frames: 0, totalMs: 0, maxMs: 0, dropped: 0 };
+  self.postMessage({
+    type: 'stats',
+    avgMs: stats.totalMs / stats.frames,
+    maxMs: stats.maxMs,
+    dropped: stats.dropped,
+    gateOpen: stats.gateOpen / stats.frames,
+  });
+  stats = { frames: 0, totalMs: 0, maxMs: 0, dropped: 0, gateOpen: 0 };
 }, 2000);
 
 self.onmessage = (event) => {
-  if (event.data?.type === 'init') init(event.data.port);
+  const msg = event.data;
+  if (msg?.type === 'init') {
+    port = msg.port;
+    port.onmessage = onWorkletMessage;
+  }
+  if (msg?.type === 'init' || msg?.type === 'options') {
+    options = { limitDb: msg.limitDb ?? options.limitDb, gate: msg.gate ?? options.gate };
+    applyOptions();
+  }
+  if (msg?.type === 'init' || msg?.type === 'model') {
+    selectModel(msg.model).catch((err) => self.postMessage({ type: 'error', message: String(err?.message ?? err) }));
+  }
 };

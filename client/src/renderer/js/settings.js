@@ -1,5 +1,6 @@
 // Окно настроек: читает и правит копию stream.config.json.
 import { $, renderList, toast } from './ui.js';
+import { playTestTone } from './tones.js';
 
 function setSelect(select, value, customLabel) {
   if (![...select.options].some((o) => o.value === value)) {
@@ -17,34 +18,19 @@ function fillDeviceSelect(select, devices, selected, fallbackName) {
 
 const num = (id) => Number($(id).value);
 
-/** Два коротких тона на устройство вывода — проверить, то ли устройство выбрано */
-async function playTestTone(deviceId) {
-  const ctx = new AudioContext();
-  try {
-    if (deviceId && deviceId !== 'default') await ctx.setSinkId(deviceId);
-    const t = ctx.currentTime + 0.05;
-    const gain = ctx.createGain();
-    gain.connect(ctx.destination);
-    gain.gain.setValueAtTime(0, t);
-    let end = t;
-    for (const [freq, start] of [
-      [660, 0],
-      [880, 0.3],
-    ]) {
-      const osc = ctx.createOscillator();
-      osc.frequency.value = freq;
-      osc.connect(gain);
-      osc.start(t + start);
-      osc.stop(t + start + 0.25);
-      gain.gain.setTargetAtTime(0.25, t + start, 0.01);
-      gain.gain.setTargetAtTime(0, t + start + 0.2, 0.015);
-      end = t + start + 0.25;
-    }
-    await new Promise((resolve) => setTimeout(resolve, (end - ctx.currentTime + 0.1) * 1000));
-  } finally {
-    await ctx.close();
-  }
-}
+export const HOTKEY_ACTIONS = [
+  ['toggleMute', 'Микрофон вкл/выкл'],
+  ['toggleDeafen', 'Звук вкл/выкл (не слышать собеседника, микрофон тоже выключается)'],
+  ['pushToTalk', 'Рация — говорить, пока клавиша зажата'],
+  ['toggleDenoise', 'Шумодав вкл/выкл'],
+  ['toggleStream', 'Начать / остановить трансляцию (стример)'],
+];
+
+const sameBinding = (a, b) =>
+  Boolean(a && b) &&
+  a.key === b.key &&
+  a.mouse === b.mouse &&
+  ['ctrl', 'shift', 'alt', 'meta'].every((m) => Boolean(a[m]) === Boolean(b[m]));
 
 export class SettingsDialog {
   /**
@@ -58,6 +44,7 @@ export class SettingsDialog {
     this.tabs.forEach((b) => b.addEventListener('click', () => this.showTab(b.dataset.tab)));
 
     $('#btnSettingsCancel').addEventListener('click', () => this.dialog.close());
+    for (const id of ['#sDenoise', '#sDenoiseModel']) $(id).addEventListener('change', () => this.updateDenoiseFields());
     $('#btnTestOutput').addEventListener('click', async () => {
       const button = $('#btnTestOutput');
       button.disabled = true;
@@ -68,6 +55,18 @@ export class SettingsDialog {
       } finally {
         button.disabled = false;
       }
+    });
+    $('#hotkeyList').addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-action]');
+      if (button) this.onHotkeyButton(button.dataset.action, button.dataset.role);
+    });
+    // Закрыли окно, пока ждали нажатия — перестаём ждать
+    this.dialog.addEventListener('close', () => {
+      if (this.recordingAction) window.duo.hotkeys.cancel();
+    });
+    // Esc во время назначения отменяет назначение, а не закрывает окно
+    this.dialog.addEventListener('cancel', (event) => {
+      if (this.recordingAction) event.preventDefault();
     });
     $('#btnOpenConfig').addEventListener('click', async () => {
       const error = await window.duo.openConfigFile();
@@ -104,11 +103,19 @@ export class SettingsDialog {
     $('#sPreview').checked = v.showPreview;
 
     $('#sDenoise').checked = a.noiseSuppression;
+    setSelect($('#sDenoiseModel'), a.denoiseModel);
+    setSelect($('#sDenoiseLimit'), String(a.denoiseLimitDb), `до −${a.denoiseLimitDb} дБ`);
+    $('#sVoiceGate').checked = a.voiceGate;
+    this.updateDenoiseFields();
     $('#sEcho').checked = a.echoCancellation;
     $('#sAgc').checked = a.autoGainControl;
     $('#sVoiceBitrate').value = a.voiceBitrateKbps;
     $('#sSystemBitrate').value = a.systemAudioBitrateKbps;
     $('#sSystemAudio').checked = a.captureSystemAudio;
+    $('#sPushToTalk').checked = a.pushToTalk;
+    $('#sPttRelease').value = a.pushToTalkReleaseMs;
+    this.recordingAction = null;
+    this.renderHotkeys();
 
     $('#sStun').value = n.iceServers
       .filter((s) => !s.username)
@@ -123,6 +130,7 @@ export class SettingsDialog {
     $('#sTurnPass').value = n.turn.credential;
     $('#sForceRelay').checked = n.forceRelay;
     $('#sJitter').value = p.jitterBufferTargetMs;
+    $('#sAutoUpdate').checked = this.cfg.app.autoUpdate;
 
     $('#configPath').textContent = configPath;
     $('#configPath').title = configPath;
@@ -139,10 +147,87 @@ export class SettingsDialog {
     this.dialog.showModal();
   }
 
+  renderHotkeys() {
+    const rows = HOTKEY_ACTIONS.map(([action, title]) => {
+      const binding = this.cfg.hotkeys[action];
+      const recording = this.recordingAction === action;
+      const row = document.createElement('div');
+      row.className = 'hotkey-row';
+      const name = document.createElement('span');
+      name.textContent = title;
+      const key = document.createElement('button');
+      key.type = 'button';
+      key.className = `key${recording ? ' recording' : ''}${binding ? '' : ' empty'}`;
+      Object.assign(key.dataset, { action, role: 'assign' });
+      key.textContent = recording ? 'Нажмите клавишу… (Esc — отмена)' : (binding?.label ?? 'Не назначено');
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'ghost icon-btn';
+      clear.title = 'Убрать';
+      clear.textContent = '✕';
+      clear.disabled = !binding || recording;
+      Object.assign(clear.dataset, { action, role: 'clear' });
+      row.append(name, key, clear);
+      return row;
+    });
+    $('#hotkeyList').replaceChildren(...rows);
+  }
+
+  async onHotkeyButton(action, role) {
+    if (role === 'clear') {
+      this.cfg.hotkeys[action] = null;
+      this.renderHotkeys();
+      return;
+    }
+    if (this.recordingAction) {
+      window.duo.hotkeys.cancel(); // повторный клик — отмена
+      return;
+    }
+    this.recordingAction = action;
+    this.renderHotkeys();
+    // Иначе Пробел/Enter, которые назначают, ещё и «нажмут» кнопку в окне
+    document.activeElement?.blur();
+    try {
+      const result = await window.duo.hotkeys.record();
+      if (result?.cleared) this.cfg.hotkeys[action] = null;
+      if (result?.binding) {
+        // Одна клавиша — одно действие
+        for (const [other, title] of HOTKEY_ACTIONS) {
+          if (other !== action && sameBinding(this.cfg.hotkeys[other], result.binding)) {
+            this.cfg.hotkeys[other] = null;
+            toast(`${result.binding.label} снята с действия «${title}»`, 'info');
+          }
+        }
+        this.cfg.hotkeys[action] = result.binding;
+      }
+    } catch (err) {
+      toast(`Горячие клавиши недоступны: ${err.message}`, 'error');
+    } finally {
+      this.recordingAction = null;
+      this.renderHotkeys();
+    }
+  }
+
+  /** Сила подавления и голосовой порог есть только у DeepFilterNet3 */
+  updateDenoiseFields() {
+    const on = $('#sDenoise').checked;
+    const dfn = $('#sDenoiseModel').value === 'dfn3';
+    $('#sDenoiseModel').disabled = !on;
+    $('#sDenoiseLimit').disabled = !on || !dfn;
+    $('#sVoiceGate').disabled = !on || !dfn;
+  }
+
   showTab(name) {
     this.tabs.forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
     for (const panel of this.dialog.querySelectorAll('[data-panel]')) panel.hidden = panel.dataset.panel !== name;
     if (name === 'diag') this.refreshDiagnostics();
+    if (name === 'keys') {
+      window.duo.getAppInfo().then(({ hotkeys }) => {
+        $('#hotkeyStatus').textContent = hotkeys.available
+          ? ''
+          : `Глобальные клавиши недоступны: ${hotkeys.error}. В окне работает Ctrl+M (микрофон).`;
+      });
+    }
   }
 
   async refreshDiagnostics() {
@@ -174,11 +259,16 @@ export class SettingsDialog {
       micDeviceId: $('#sMic').value || 'default',
       outputDeviceId: $('#sOutput').value || 'default',
       noiseSuppression: $('#sDenoise').checked,
+      denoiseModel: $('#sDenoiseModel').value,
+      denoiseLimitDb: num('#sDenoiseLimit'),
+      voiceGate: $('#sVoiceGate').checked,
       echoCancellation: $('#sEcho').checked,
       autoGainControl: $('#sAgc').checked,
       voiceBitrateKbps: num('#sVoiceBitrate'),
       systemAudioBitrateKbps: num('#sSystemBitrate'),
       captureSystemAudio: $('#sSystemAudio').checked,
+      pushToTalk: $('#sPushToTalk').checked,
+      pushToTalkReleaseMs: num('#sPttRelease'),
     });
     const stun = $('#sStun')
       .value.split(/\s+/)
@@ -195,6 +285,7 @@ export class SettingsDialog {
     };
     cfg.network.forceRelay = $('#sForceRelay').checked;
     cfg.playback.jitterBufferTargetMs = num('#sJitter');
+    cfg.app.autoUpdate = $('#sAutoUpdate').checked;
     return cfg;
   }
 }

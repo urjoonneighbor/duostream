@@ -6,7 +6,8 @@ npm start            # запуск
 npm run start:viewer # второй экземпляр с отдельным профилем (проверка на одном ПК)
 npm run build:native # собрать native/bin/duostream-capture.exe (захват 120 FPS)
 npm run test:denoiser
-npm run dist         # DuoStream-Setup / portable exe в dist/ (захват, сервер — всё внутри)
+npm run dist         # DuoStream-Setup / portable exe в dist/ (захват, сервер — всё внутри); ничего не публикует
+npm run fetch-models # перекачать ONNX-модели шумодава (DeepFilterNet3, DTLN) с проверкой SHA-256
 # Electron не скачался («Electron failed to install correctly»):
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-electron.ps1
 ```
@@ -35,9 +36,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-electron.ps1
 - **src/renderer/js/codecs.js** — `MediaCapabilities.encodingInfo` (аппаратный ли энкодер),
   `setCodecPreferences`, определение HW/SW по статистике.
 - **src/renderer/js/sdp.js** — `x-google-min/start/max-bitrate`, `b=AS`, параметры Opus (FEC, стерео).
-- **src/renderer/audio/** — шумодав: AudioWorklet режет звук на кадры по 8 мс и через MessagePort
-  отдаёт их Web Worker; там ONNX Runtime Web (WASM) прогоняет DTLN (48 → 16 кГц → модель → 48 кГц).
-  `dtln-core.js` не зависит от браузера и проверяется в Node (`scripts/test-denoiser.mjs`).
+- **src/renderer/audio/** — шумодав: AudioWorklet режет звук на кадры модели и через MessagePort
+  отдаёт их Web Worker; там ONNX Runtime Web (WASM) прогоняет DeepFilterNet3 (`dfn-core.js`: кадр 10 мс
+  на 48 кГц, полный диапазон, рекуррентное состояние между кадрами, голосовой порог по оценке SNR модели)
+  или лёгкую DTLN (`dtln-core.js`: 48 → 16 кГц → модель → 48 кГц). Модель меняется на лету; если
+  DeepFilterNet3 не загрузится, воркер сам включит DTLN. Оба ядра не зависят от браузера и проверяются
+  в Node (`scripts/test-denoiser.mjs`).
+- **src/main/hotkeys.js** — глобальные горячие клавиши на низкоуровневом хуке (uiohook-napi, готовая
+  сборка N-API — компилятор не нужен): нажатие и отпускание клавиш и кнопок мыши, назначение «нажмите
+  клавишу». Действия выполняет интерфейс (`app.js` → `onHotkey`) и подтверждает звуком (`js/tones.js`).
+- **src/main/updater.js** — electron-updater: релизы GitHub, которые публикует
+  `.github/workflows/release.yml`.
 - **src/renderer/js/stats.js** — битрейт, пинг, потери, FPS, кодек, путь P2P/TURN.
 
 Отладка: F12 открывает DevTools, в консоли доступен `duoDebug` — состояние приложения
