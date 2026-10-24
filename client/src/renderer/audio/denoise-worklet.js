@@ -1,22 +1,26 @@
-// AudioWorklet: режет микрофон на кадры по 8 мс, отдаёт их воркеру шумодава и
-// воспроизводит очищенный звук из кольцевого буфера. Пока шумодав выключен или
-// не загрузился — звук проходит насквозь без задержки.
-const FRAME = 384; // 8 мс @ 48 кГц = один шаг DTLN (128 отсчётов @ 16 кГц)
+// AudioWorklet: режет микрофон на кадры модели (DeepFilterNet3 — 10 мс, DTLN — 8 мс), отдаёт их
+// воркеру шумодава и воспроизводит очищенный звук из кольцевого буфера. Пока шумодав выключен
+// или не загрузился — звук проходит насквозь без задержки.
 const FIFO_SIZE = 48000;
-const PREFILL = FRAME * 2; // запас 16 мс на неравномерность ответа воркера
-const MAX_BACKLOG = PREFILL + FRAME * 4;
+const SLACK = 384; // запас 8 мс сверх кадра на неравномерность ответа воркера
 
 class DuoDenoiseProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.enabled = false;
     this.worker = null;
-    this.frame = new Float32Array(FRAME);
+    this.setFrameSize(480);
     this.fifo = new Float32Array(FIFO_SIZE);
     this.underruns = 0;
     this.lastReport = 0;
     this.resetBuffers();
     this.port.onmessage = (event) => this.onControl(event.data);
+  }
+
+  setFrameSize(size) {
+    this.frame = new Float32Array(size);
+    this.prefill = size + SLACK;
+    this.maxBacklog = this.prefill + size * 4;
   }
 
   resetBuffers() {
@@ -35,7 +39,9 @@ class DuoDenoiseProcessor extends AudioWorkletProcessor {
       };
     } else if (msg.type === 'enable') {
       const on = Boolean(msg.value) && this.worker !== null;
-      if (on === this.enabled) return;
+      const resize = on && msg.frame && msg.frame !== this.frame.length;
+      if (on === this.enabled && !resize) return;
+      if (resize) this.setFrameSize(msg.frame);
       this.enabled = on;
       this.resetBuffers();
       if (on) this.worker.postMessage({ type: 'reset' });
@@ -64,12 +70,13 @@ class DuoDenoiseProcessor extends AudioWorkletProcessor {
       return true;
     }
 
+    const size = this.frame.length;
     for (let i = 0; i < input.length; ) {
-      const n = Math.min(input.length - i, FRAME - this.framePos);
+      const n = Math.min(input.length - i, size - this.framePos);
       this.frame.set(input.subarray(i, i + n), this.framePos);
       this.framePos += n;
       i += n;
-      if (this.framePos === FRAME) {
+      if (this.framePos === size) {
         const copy = this.frame.slice();
         this.worker.postMessage({ type: 'frame', data: copy }, [copy.buffer]);
         this.framePos = 0;
@@ -77,7 +84,7 @@ class DuoDenoiseProcessor extends AudioWorkletProcessor {
     }
 
     if (!this.primed) {
-      if (this.count < PREFILL) {
+      if (this.count < this.prefill) {
         output.fill(0);
         return true;
       }
@@ -94,8 +101,8 @@ class DuoDenoiseProcessor extends AudioWorkletProcessor {
       }
       this.count -= output.length;
       // Если воркер отдал кадры пачкой после подвисания — срезаем лишнее, чтобы задержка не копилась
-      if (this.count > MAX_BACKLOG) {
-        const drop = this.count - PREFILL;
+      if (this.count > this.maxBacklog) {
+        const drop = this.count - this.prefill;
         this.read = (this.read + drop) % FIFO_SIZE;
         this.count -= drop;
       }

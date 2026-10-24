@@ -2,13 +2,14 @@
 // захват экрана, микрофон с шумодавом, индикатор качества и настройки.
 import { SignalingClient } from './signaling.js';
 import { PeerSession } from './peer.js';
-import { MicPipeline } from './audio.js';
+import { MicPipeline, DENOISE_MODELS } from './audio.js';
 import { probeVideoCodecs, orderCodecs } from './codecs.js';
 import { StatsMonitor, describeStats, describeIce, formatKbps, formatPath } from './stats.js';
 import { openSourcePicker } from './picker.js';
 import { NativeCaptureTrack, nativeCaptureStatus } from './native-capture.js';
 import { SettingsDialog } from './settings.js';
 import { $, toast, renderIcons, setIcon, renderList } from './ui.js';
+import { playCue } from './tones.js';
 
 const ROLE_NAME = { streamer: 'Стример', viewer: 'Зритель' };
 const FATAL_CODES = new Set(['auth-failed', 'banned', 'replaced', 'bad-version', 'bad-role']);
@@ -29,9 +30,12 @@ const state = {
   stats: null,
   mic: null,
   denoiseErrorShown: false,
+  denoiseWarningShown: '',
   screen: null, // MediaStream захвата экрана (стример)
   capture: null, // {engine:'native'|'chromium', native, width, height, scale}
-  hostedServer: null, // встроенный сигнальный сервер стримера: {port, own, address}
+  hostedServer: null, // встроенный сигнальный сервер стримера: {port, own}
+  share: null, // стример: {address} — что передать зрителю
+  publicIp: null, // белый IP стримера (настройка, HTTPS или STUN)
   lastPick: null, // последний выбранный источник — для отката на захват Chromium
   nativeStatus: null, // доступен ли собственный захват (src/main/native-capture.js)
   nativeStats: null,
@@ -44,6 +48,14 @@ const state = {
   lastEncoderRestart: 0, // когда последний раз пересоздавали сессию из-за ухода энкодера на CPU
   pathAnnounced: false,
   hudOpen: false,
+  micMuted: false, // микрофон выключен кнопкой или горячей клавишей
+  deafened: false, // звук собеседника выключен (и микрофон вместе с ним)
+  pttHeld: false, // режим рации: клавиша зажата
+  pttTimer: 0,
+  updateShown: null, // версия, о которой уже показали уведомление
+  outputs: new Map(), // deviceId → название устройства вывода звука
+  voicePeakDb: -Infinity, // максимум уровня голоса собеседника с прошлого тика статистики
+  voiceDb: -Infinity, // то же за последнюю завершённую секунду (для окна статистики)
 };
 
 // Для отладки в DevTools (F12): duoDebug.session.pc.remoteDescription.sdp и т. п.
@@ -96,9 +108,17 @@ function updateConnectHint(text, isError = false) {
   hint.textContent = text ?? fallback;
 }
 
-/** Внешний IP через STUN (srflx-кандидат) — чтобы показать стримеру готовый адрес для зрителя. */
+/**
+ * Внешний IP стримера для адреса зрителю и кандидатов проброшенного порта: из настроек, иначе
+ * по HTTPS (так же, как зритель придёт к серверу по TCP), и только в крайнем случае через STUN —
+ * провайдер или роутер может уводить UDP к серверам Google через другой адрес.
+ */
 async function detectPublicIp(network) {
   if (network.publicIp) return network.publicIp;
+  return (await window.duo.getPublicIp()) ?? stunPublicIp(network);
+}
+
+async function stunPublicIp(network) {
   const pc = new RTCPeerConnection({ iceServers: network.iceServers });
   try {
     const found = new Promise((resolve) => {
@@ -123,12 +143,18 @@ async function startHostedServer(port, password) {
   const result = await window.duo.server.start(port, password);
   if (!result.ok && result.code !== 'EADDRINUSE') throw new Error(`встроенный сервер не запустился: ${result.error}`);
   if (!result.ok) toast(`Порт ${port} уже занят — подключаюсь к уже запущенному серверу`, 'warn', 7000);
-  state.hostedServer = { port, own: result.ok, address: `ws://<ваш белый IP>:${port}` };
+  state.hostedServer = { port, own: result.ok };
+}
+
+/** Стример: адрес, который нужно передать зрителю, и белый IP для кандидатов проброшенного порта. */
+function prepareShareAddress(port) {
+  state.share = { address: `ws://<ваш белый IP>:${port}` };
   detectPublicIp(state.cfg.network).then((ip) => {
-    if (ip && state.hostedServer?.port === port) {
-      state.hostedServer.address = `ws://${ip}:${port}`;
-      render();
-    }
+    if (!ip || !state.share) return;
+    state.publicIp = ip;
+    state.share.address = `ws://${ip}:${port}`;
+    if (state.role === 'streamer') state.session?.addPublicIp(ip);
+    render();
   });
 }
 
@@ -151,6 +177,7 @@ async function connect(event) {
     state.cfg = await window.duo.saveConfig({ ...state.cfg, signaling: signalingCfg });
     state.role = role;
     if (hostServer) await startHostedServer(port, password);
+    if (role === 'streamer') prepareShareAddress(hostServer ? port : Number(new URL(url).port) || 80);
     await ensureMic();
     if (role === 'streamer') await ensureCodecProbe();
 
@@ -228,6 +255,7 @@ function teardown() {
   // Встроенный сервер живёт, пока стример подключён
   if (state.hostedServer?.own) window.duo.server.stop();
   state.hostedServer = null;
+  state.share = null;
   state.mic?.stop();
   state.mic = null;
   render();
@@ -249,6 +277,7 @@ function createSession(role, sid) {
     send: (msg) => state.signaling?.sendSignal(msg) ?? Promise.resolve(false),
     micTrack: state.mic?.track ?? null,
     serverHost,
+    publicIp: role === 'streamer' ? state.publicIp : null,
   });
   session.addEventListener('track', onRemoteTrack);
   session.addEventListener('state', (e) => onPeerState(session, e.detail.state));
@@ -646,20 +675,116 @@ async function ensureMic() {
       state.denoiseErrorShown = true;
       toast(`Шумодав не загрузился: ${mic.denoiseError}. Голос идёт без шумоподавления.`, 'error', 10000);
     }
+    if (mic.denoiseWarning && mic.denoiseWarning !== state.denoiseWarningShown) {
+      state.denoiseWarningShown = mic.denoiseWarning;
+      toast(mic.denoiseWarning, 'warn', 10000);
+    }
     render();
   });
   try {
     await mic.start(state.cfg.audio);
     state.mic = mic;
+    applyVoiceState(); // выключенный микрофон и режим рации переживают переподключение
+    refreshOutputs(); // после разрешения на микрофон у устройств появляются названия
   } catch (err) {
     mic.stop();
     toast(`Микрофон недоступен (${err.message}). Подключаюсь без голоса.`, 'warn', 8000);
   }
 }
 
+// ======================= микрофон, звук, рация =======================
+
+/** Режим рации включён и клавиша назначена */
+const pushToTalk = () => state.cfg.audio.pushToTalk && Boolean(state.cfg.hotkeys.pushToTalk);
+
+/** Микрофон передаётся: не выключен, звук не выключен, а в режиме рации ещё и зажата клавиша */
+function applyVoiceState() {
+  const transmit = !state.micMuted && !state.deafened && (!pushToTalk() || state.pttHeld);
+  state.mic?.setMuted(!transmit);
+  $('#voiceAudio').muted = state.deafened;
+  $('#systemAudio').muted = state.deafened;
+  render();
+}
+
+/** Как в Discord: включение микрофона при выключенном звуке включает и звук */
 function toggleMic() {
-  if (!state.mic) return;
-  state.mic.setMuted(!state.mic.muted);
+  if (state.deafened) Object.assign(state, { deafened: false, micMuted: false });
+  else state.micMuted = !state.micMuted;
+  applyVoiceState();
+}
+
+function toggleDeafen() {
+  state.deafened = !state.deafened;
+  applyVoiceState();
+}
+
+// ======================= обновления =======================
+
+function onUpdateState(update) {
+  if (state.updateShown === update.version) return;
+  if (update.status === 'ready') {
+    state.updateShown = update.version;
+    toast(`Скачано обновление ${update.version}. Установится, когда вы закроете DuoStream.`, 'ok', 0, {
+      label: 'Перезапустить сейчас',
+      onClick: () => window.duo.update.install(),
+    });
+  } else if (update.status === 'available') {
+    state.updateShown = update.version;
+    toast(`Вышла версия ${update.version} (у вас ${update.current}). Portable-версия сама не обновляется.`, 'info', 0, {
+      label: 'Скачать',
+      onClick: () => window.duo.update.install(),
+    });
+  }
+}
+
+function describeUpdate(u) {
+  const status = {
+    dev: 'не проверяются при запуске из исходников',
+    off: 'проверка выключена в настройках',
+    idle: 'ещё не проверялись',
+    checking: 'проверка…',
+    latest: 'установлена последняя',
+    downloading: `скачивается ${u.version}: ${u.percent ?? 0}%`,
+    ready: `${u.version} скачана, установится при выходе`,
+    available: `вышла ${u.version} — ${u.url}`,
+    error: `ошибка проверки: ${u.error}`,
+  }[u.status];
+  return `версия ${u.current}${u.portable ? ' (portable)' : ''} · ${status ?? u.status}`;
+}
+
+function onHotkey({ action, phase }) {
+  const cue = (kind) => playCue(kind, state.cfg.audio.outputDeviceId);
+  if (action === 'pushToTalk') {
+    clearTimeout(state.pttTimer);
+    if (phase === 'down') {
+      state.pttHeld = true;
+      applyVoiceState();
+    } else {
+      state.pttTimer = setTimeout(() => {
+        state.pttHeld = false;
+        applyVoiceState();
+      }, state.cfg.audio.pushToTalkReleaseMs);
+    }
+    return;
+  }
+  if (phase !== 'down') return;
+  if (action === 'toggleMute') {
+    toggleMic();
+    cue(state.micMuted ? 'off' : 'on');
+  } else if (action === 'toggleDeafen') {
+    toggleDeafen();
+    cue(state.deafened ? 'deafen' : 'undeafen');
+  } else if (action === 'toggleDenoise' && state.mic) {
+    toggleDenoise().then(() => cue(state.mic?.denoiseWanted ? 'on' : 'off'));
+  } else if (action === 'toggleStream' && state.role === 'streamer' && state.signaling) {
+    if (state.screen) {
+      stopStream();
+      cue('off');
+    } else {
+      // Источник выбирается в окне — показываем его поверх игры
+      window.duo.focusWindow().then(startStream);
+    }
+  }
 }
 
 async function toggleDenoise() {
@@ -677,18 +802,49 @@ function denoiseSummary() {
   if (s === 'loading') return 'загрузка модели…';
   if (s === 'error') return `ошибка: ${mic.denoiseError}`;
   const p = mic.perf;
-  return `DTLN · ${p.avgMs.toFixed(2)} мс на кадр 8 мс (макс ${p.maxMs.toFixed(1)}), пропусков ${p.underruns + p.dropped}`;
+  const frameMs = (mic.frame / 48000) * 1000;
+  const gate = mic.model === 'dfn3' && state.cfg.audio.voiceGate ? `, порог открыт ${Math.round(p.gateOpen * 100)}% времени` : '';
+  return (
+    `${DENOISE_MODELS[mic.model] ?? mic.model} · ${p.avgMs.toFixed(2)} мс на кадр ${frameMs} мс ` +
+    `(макс ${p.maxMs.toFixed(1)}), пропусков ${p.underruns + p.dropped}${gate}`
+  );
 }
+
+/** Шкала индикатора: −60…0 дБ → 0…1, как у индикатора микрофона */
+const meterScale = (db) => Math.min(1, Math.max(0, (db + 60) / 60));
 
 function meterLoop() {
   const level = state.mic?.level() ?? 0;
   $('#micLevel').style.transform = `scaleX(${level.toFixed(3)})`;
+  const voice = state.session?.remoteVoiceLevel() ?? 0;
+  const voiceDb = voice > 0 ? 20 * Math.log10(voice) : -Infinity;
+  state.voicePeakDb = Math.max(state.voicePeakDb, voiceDb);
+  $('#voiceLevel').style.transform = `scaleX(${meterScale(voiceDb).toFixed(3)})`;
   requestAnimationFrame(meterLoop);
+}
+
+/** Куда выводится голос собеседника — по названию устройства, а не по deviceId */
+function outputLabel() {
+  const id = state.cfg.audio.outputDeviceId;
+  return state.outputs.get(id) ?? (id === 'default' ? 'устройство по умолчанию' : 'выбранное устройство (сейчас не найдено)');
+}
+
+async function refreshOutputs() {
+  const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+  state.outputs = new Map(devices.filter((d) => d.kind === 'audiooutput' && d.label).map((d) => [d.deviceId, d.label]));
+}
+
+function voiceSummary() {
+  const db = state.voiceDb;
+  const level = db > -55 ? `есть звук (${Math.round(db)} дБ)` : 'тишина: собеседник молчит или выключил микрофон';
+  return `${level} → ${outputLabel()}`;
 }
 
 // ======================= статистика =======================
 
 async function tickStats() {
+  state.voiceDb = state.voicePeakDb;
+  state.voicePeakDb = -Infinity;
   const monitor = state.monitor;
   if (!monitor || state.session?.pc.connectionState !== 'connected') {
     renderQuality(null);
@@ -718,7 +874,8 @@ function renderQuality(stats) {
     $('#qualityText').textContent = `${out ? '↑' : '↓'} ${formatKbps(kbps)} · ${ping} · потери ${loss}`;
   }
   if (state.hudOpen) {
-    const extra = state.mic ? { Шумодав: denoiseSummary() } : {};
+    const extra = { 'Голос собеседника': voiceSummary() };
+    if (state.mic) extra['Шумодав'] = denoiseSummary();
     if (state.capture) extra['Захват'] = captureSummary();
     if (stats) {
       renderList($('#hudList'), describeStats(stats, extra));
@@ -788,7 +945,7 @@ async function saveSettings(next) {
     }
   }
   toast('Настройки сохранены', 'ok', 2500);
-  render();
+  applyVoiceState(); // режим рации мог включиться или выключиться
 }
 
 async function collectDiagnostics() {
@@ -831,7 +988,12 @@ async function collectDiagnostics() {
   ]);
   const range = info.udpPortRange;
   rows.push(['UDP-порты WebRTC', range?.min ? `${range.min}–${range.max}` : 'без ограничений']);
+  rows.push(['Глобальные клавиши', info.hotkeys.available ? 'работают' : `недоступны: ${info.hotkeys.error}`]);
+  rows.push(['Обновления', describeUpdate(info.update)]);
   if (state.mic) rows.push(['Микрофон', state.mic.deviceLabel || '—'], ['Шумодав', denoiseSummary()]);
+  await refreshOutputs();
+  rows.push(['Вывод звука', outputLabel()]);
+  if (state.session) rows.push(['Голос собеседника', voiceSummary()]);
   if (state.stats) rows.push(...describeStats(state.stats));
   if (info.profile) rows.push(['Профиль', info.profile]);
   return rows;
@@ -910,9 +1072,9 @@ function render() {
     $('#stageSpinner').hidden = !message.spinner;
   }
   // Пока зритель не подключился — показываем стримеру адрес, который нужно ему передать
-  const share = Boolean(message) && streamer && Boolean(state.hostedServer) && !state.peer;
+  const share = Boolean(message) && streamer && Boolean(state.share) && !state.peer;
   $('#shareBox').hidden = !share;
-  if (share) $('#shareAddress').textContent = state.hostedServer.address;
+  if (share) $('#shareAddress').textContent = state.share.address;
 
   // Кнопки
   const streamBtn = $('#btnStream');
@@ -924,10 +1086,23 @@ function render() {
   $('#btnDisconnect').hidden = !connected;
 
   const mic = state.mic;
+  const keys = state.cfg.hotkeys;
+  const keyHint = (action, fallback = '') => (keys[action] ? ` (${keys[action].label})` : fallback);
+  const micOn = Boolean(mic) && !state.micMuted && !state.deafened;
   const micBtn = $('#btnMic');
   micBtn.disabled = !mic;
-  micBtn.setAttribute('aria-pressed', String(Boolean(mic) && !mic.muted));
-  setIcon(micBtn.querySelector('i'), mic && !mic.muted ? 'mic' : 'micOff');
+  micBtn.setAttribute('aria-pressed', String(micOn));
+  // Рация: микрофон включён, но передаёт, только пока клавиша зажата
+  micBtn.dataset.ptt = micOn && pushToTalk() ? (state.pttHeld ? 'talking' : 'idle') : '';
+  micBtn.title = pushToTalk()
+    ? `Рация: говорите, удерживая ${keys.pushToTalk.label}. Кнопка — выключить микрофон совсем`
+    : `Микрофон${keyHint('toggleMute', ' (Ctrl+M)')}`;
+  setIcon(micBtn.querySelector('i'), micOn ? 'mic' : 'micOff');
+
+  const deafenBtn = $('#btnDeafen');
+  deafenBtn.setAttribute('aria-pressed', String(!state.deafened));
+  deafenBtn.title = `${state.deafened ? 'Звук выключен — включить' : 'Выключить звук собеседника'}${keyHint('toggleDeafen')}`;
+  setIcon(deafenBtn.querySelector('i'), state.deafened ? 'headphonesOff' : 'headphones');
 
   const denoiseBtn = $('#btnDenoise');
   const ds = mic?.denoiseState ?? 'off';
@@ -974,7 +1149,7 @@ function bindEvents() {
   $('#fHostServer').addEventListener('change', updateConnectFields);
   $('#btnCopyAddress').addEventListener('click', async () => {
     try {
-      await navigator.clipboard.writeText(state.hostedServer?.address ?? '');
+      await navigator.clipboard.writeText(state.share?.address ?? '');
       toast('Адрес скопирован', 'ok', 2000);
     } catch (err) {
       toast(`Не удалось скопировать: ${err.message}`, 'warn');
@@ -983,6 +1158,9 @@ function bindEvents() {
   $('#btnStream').addEventListener('click', () => (state.screen ? stopStream() : startStream()));
   $('#btnDisconnect').addEventListener('click', disconnect);
   $('#btnMic').addEventListener('click', toggleMic);
+  $('#btnDeafen').addEventListener('click', toggleDeafen);
+  window.duo.hotkeys.onAction(onHotkey);
+  window.duo.update.onState(onUpdateState);
   $('#btnDenoise').addEventListener('click', toggleDenoise);
   $('#btnQuality').addEventListener('click', () => {
     state.hudOpen = !state.hudOpen;
@@ -999,6 +1177,7 @@ function bindEvents() {
     }
   });
   window.addEventListener('beforeunload', () => state.session?.send({ kind: 'bye' }));
+  navigator.mediaDevices.addEventListener('devicechange', refreshOutputs);
 }
 
 async function init() {
@@ -1016,6 +1195,7 @@ async function init() {
   fillConnectForm();
   bindEvents();
   restoreVolumes();
+  refreshOutputs();
   render();
   setInterval(() => tickStats().catch((err) => console.warn('[stats]', err)), 1000);
   requestAnimationFrame(meterLoop);

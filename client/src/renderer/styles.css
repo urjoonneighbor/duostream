@@ -239,9 +239,18 @@ textarea {
   gap: 6px;
   min-width: 0;
 }
-.field > span {
+.field > span,
+.field > label {
   color: var(--muted);
   font-size: 12px;
+}
+.with-button {
+  display: flex;
+  gap: 8px;
+}
+.with-button select {
+  flex: 1;
+  min-width: 0;
 }
 .hint {
   color: var(--muted);
@@ -590,6 +599,30 @@ legend {
 .diag {
   font-size: 12px;
 }
+.hotkeys {
+  display: grid;
+  gap: 8px;
+}
+.hotkey-row {
+  display: grid;
+  grid-template-columns: 1fr minmax(180px, auto) auto;
+  align-items: center;
+  gap: 8px;
+}
+.hotkey-row .key {
+  font-variant-numeric: tabular-nums;
+  justify-content: center;
+}
+.hotkey-row .key.empty {
+  color: var(--muted);
+}
+.hotkey-row .key.recording {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.toggle[data-ptt='idle'] {
+  color: var(--muted);
+}
 
 /* ---------- уведомления ---------- */
 .toasts {
@@ -611,6 +644,15 @@ legend {
   line-height: 1.4;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
   animation: toast-in 0.2s ease-out;
+}
+.toast-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+.toast-actions button {
+  padding: 4px 10px;
 }
 .toast.warn {
   border-left-color: var(--fair);

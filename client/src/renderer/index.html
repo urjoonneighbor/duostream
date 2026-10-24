@@ -83,11 +83,15 @@
           <i data-icon="mic"></i>
           <span class="meter"><i id="micLevel"></i></span>
         </button>
-        <button class="toggle" id="btnDenoise" title="Шумоподавление (DTLN, ONNX Runtime)" disabled>
+        <button class="toggle" id="btnDeafen" title="Звук собеседника">
+          <i data-icon="headphones"></i>
+        </button>
+        <button class="toggle" id="btnDenoise" title="Шумоподавление (DeepFilterNet3 / DTLN, ONNX Runtime)" disabled>
           <i data-icon="wave"></i><span id="denoiseText">Шумодав</span>
         </button>
-        <label class="volume" title="Громкость собеседника">
-          <span>Голос</span><input type="range" id="voiceVolume" min="0" max="100" value="100" />
+        <label class="volume" title="Громкость собеседника; индикатор — уровень его голоса, который до нас доходит">
+          <span>Голос</span><span class="meter"><i id="voiceLevel"></i></span>
+          <input type="range" id="voiceVolume" min="0" max="100" value="100" />
         </label>
         <label class="volume" id="streamVolumeWrap" title="Громкость звука трансляции" hidden>
           <span>Стрим</span><input type="range" id="streamVolume" min="0" max="100" value="80" />
@@ -131,6 +135,7 @@
             <button type="button" data-tab="video" class="active">Видео</button>
             <button type="button" data-tab="audio">Звук</button>
             <button type="button" data-tab="network">Сеть</button>
+            <button type="button" data-tab="keys">Клавиши</button>
             <button type="button" data-tab="diag">Диагностика</button>
           </div>
         </header>
@@ -208,9 +213,34 @@
         <section data-panel="audio" hidden>
           <div class="row">
             <label class="field"><span>Микрофон</span><select id="sMic"></select></label>
-            <label class="field"><span>Устройство вывода звука</span><select id="sOutput"></select></label>
+            <div class="field">
+              <label for="sOutput">Устройство вывода звука</label>
+              <div class="with-button">
+                <select id="sOutput"></select>
+                <button type="button" id="btnTestOutput" title="Короткий сигнал на выбранное устройство">Проверить</button>
+              </div>
+            </div>
           </div>
-          <label class="check"><input type="checkbox" id="sDenoise" /><span>Шумоподавление (DTLN на ONNX Runtime, локально)</span></label>
+          <label class="check"><input type="checkbox" id="sDenoise" /><span>Шумоподавление (нейросеть на ONNX Runtime, локально)</span></label>
+          <div class="row">
+            <label class="field">
+              <span>Модель шумодава</span>
+              <select id="sDenoiseModel">
+                <option value="dfn3">DeepFilterNet3 — полный диапазон 48 кГц, как Krisp</option>
+                <option value="dtln">DTLN — лёгкая, 16 кГц (голос глуше)</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Сила подавления (DeepFilterNet3)</span>
+              <select id="sDenoiseLimit">
+                <option value="0">Максимальная</option>
+                <option value="30">Сильная — фон тише на 30 дБ</option>
+                <option value="20">Средняя — на 20 дБ</option>
+                <option value="12">Мягкая — на 12 дБ, звучит естественнее</option>
+              </select>
+            </label>
+          </div>
+          <label class="check"><input type="checkbox" id="sVoiceGate" /><span>Тишина в паузах: глушить микрофон, пока вы молчите (голосовой порог, DeepFilterNet3)</span></label>
           <label class="check"><input type="checkbox" id="sEcho" /><span>Эхоподавление (выключите, если вы в наушниках)</span></label>
           <label class="check"><input type="checkbox" id="sAgc" /><span>Автоматическая регулировка громкости микрофона</span></label>
           <div class="row">
@@ -228,6 +258,10 @@
             Системный звук захватывается целиком с устройства вывода по умолчанию. Чтобы зритель не слышал
             сам себя, выберите для голоса собеседника другое устройство вывода (например, гарнитуру).
           </p>
+          <p class="hint">
+            Не слышно собеседника? Нажмите «Проверить»: если сигнала нет, выберите устройство, к которому
+            подключены наушники или колонки. Индикатор у ползунка «Голос» внизу окна показывает, доходит ли его звук.
+          </p>
         </section>
 
         <section data-panel="network" hidden>
@@ -240,7 +274,7 @@
             <label class="field"><span>до</span><input id="sPortMax" type="number" min="0" max="65535" /></label>
           </div>
           <label class="field">
-            <span>Белый IP стримера (необязательно — определяется через STUN)</span>
+            <span>Белый IP стримера (необязательно — определяется автоматически)</span>
             <input id="sPublicIp" placeholder="203.0.113.10" spellcheck="false" />
           </label>
           <fieldset>
@@ -257,6 +291,26 @@
             <input id="sJitter" type="number" min="0" max="4000" step="10" />
           </label>
           <p class="hint">Сетевые настройки применяются при следующем подключении.</p>
+          <label class="check"><input type="checkbox" id="sAutoUpdate" /><span>Проверять обновления на GitHub (установленная версия обновляется при выходе, portable — сообщает о новой версии)</span></label>
+        </section>
+
+        <section data-panel="keys" hidden>
+          <p class="hint">
+            Клавиши работают везде — и когда окно свёрнуто, и в игре; игра нажатие тоже получает. Можно назначить
+            сочетание с Ctrl/Shift/Alt, отдельный Ctrl или Alt, среднюю и боковые кнопки мыши. Backspace во время
+            назначения убирает клавишу.
+          </p>
+          <div class="hotkeys" id="hotkeyList"></div>
+          <label class="check"><input type="checkbox" id="sPushToTalk" /><span>Режим рации: микрофон передаётся, только пока зажата клавиша «Рация»</span></label>
+          <label class="field">
+            <span>Рация: выключать микрофон через, мс после отпускания (чтобы не обрезать конец слова)</span>
+            <input id="sPttRelease" type="number" min="0" max="2000" step="50" />
+          </label>
+          <p class="hint">
+            Если игра запущена от имени администратора, Windows не показывает её нажатия обычным программам —
+            тогда и DuoStream запускайте от имени администратора.
+          </p>
+          <p class="hint" id="hotkeyStatus"></p>
         </section>
 
         <section data-panel="diag" hidden>

@@ -29,6 +29,7 @@
       "output": "dist"
     },
     "electronDist": "node_modules/electron/dist",
+    "npmRebuild": false,
     "files": [
       "src/**/*",
       "config/stream.config.default.json",
@@ -63,6 +64,14 @@
         "portable"
       ]
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "urjoonneighbor",
+        "repo": "duostream",
+        "releaseType": "release"
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
@@ -77,6 +86,8 @@
     }
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
+    "uiohook-napi": "^1.5.5",
     "ws": "^8.22.0"
   }
 }

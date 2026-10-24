@@ -25,11 +25,23 @@
     "micDeviceId": "default",
     "outputDeviceId": "default",
     "noiseSuppression": true,
+    "denoiseModel": "dfn3",
+    "denoiseLimitDb": 0,
+    "voiceGate": true,
     "echoCancellation": true,
     "autoGainControl": true,
     "voiceBitrateKbps": 64,
     "captureSystemAudio": false,
-    "systemAudioBitrateKbps": 160
+    "systemAudioBitrateKbps": 160,
+    "pushToTalk": false,
+    "pushToTalkReleaseMs": 150
+  },
+  "hotkeys": {
+    "toggleMute": { "key": 50, "ctrl": true, "shift": true, "alt": false, "meta": false, "label": "Ctrl + Shift + M" },
+    "toggleDeafen": { "key": 32, "ctrl": true, "shift": true, "alt": false, "meta": false, "label": "Ctrl + Shift + D" },
+    "pushToTalk": null,
+    "toggleDenoise": null,
+    "toggleStream": null
   },
   "network": {
     "iceServers": [
@@ -47,5 +59,8 @@
   },
   "playback": {
     "jitterBufferTargetMs": 0
+  },
+  "app": {
+    "autoUpdate": true
   }
 }

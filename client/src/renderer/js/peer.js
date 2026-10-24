@@ -63,7 +63,7 @@ export class PeerSession extends EventTarget {
    *          micTrack:MediaStreamTrack|null, serverHost?:string}} options
    *   serverHost — хост сигнального сервера из адреса подключения (у зрителя это белый IP стримера)
    */
-  constructor({ role, sid, cfg, send, micTrack, serverHost = '' }) {
+  constructor({ role, sid, cfg, send, micTrack, serverHost = '', publicIp = null }) {
     super();
     this.role = role;
     this.serverHost = serverHost;
@@ -91,7 +91,7 @@ export class PeerSession extends EventTarget {
     this.paramsChain = Promise.resolve();
 
     // Для синтеза кандидатов «белый IP : проброшенный порт»
-    this.publicIps = new Set(cfg.network.publicIp ? [cfg.network.publicIp] : []);
+    this.publicIps = new Set([cfg.network.publicIp, publicIp].filter(Boolean));
     this.hostCandidates = [];
     this.announced = new Set();
     this.forwardedCount = 0;
@@ -373,12 +373,24 @@ export class PeerSession extends EventTarget {
    * Так зритель за любым NAT (включая симметричный CGNAT) достучится до стримера напрямую.
    */
   announceForwardedPorts(c) {
-    const { min, max } = this.cfg.network.udpPortRange;
+    const { min } = this.cfg.network.udpPortRange;
     if (!min || c.protocol !== 'udp' || !c.address || c.address.includes(':') || c.address.endsWith('.local')) return;
     if (c.type === 'host') this.hostCandidates.push(c);
     else if (c.type === 'srflx') this.publicIps.add(c.address);
     else return;
+    this.sendForwardedCandidates();
+  }
 
+  /** Белый IP стал известен позже (HTTPS-запрос в app.js) — досылаем кандидаты для уже собранных портов. */
+  addPublicIp(ip) {
+    if (this.closed || this.publicIps.has(ip)) return;
+    this.publicIps.add(ip);
+    this.sendForwardedCandidates();
+  }
+
+  sendForwardedCandidates() {
+    const { min, max } = this.cfg.network.udpPortRange;
+    if (!min) return;
     for (const ip of this.publicIps) {
       for (const host of this.hostCandidates) {
         if (host.port < min || host.port > max || host.address === ip) continue;
@@ -395,6 +407,16 @@ export class PeerSession extends EventTarget {
         this.emit('forwarded-candidate', { ip, port: host.port });
       }
     }
+  }
+
+  /**
+   * Уровень голоса собеседника, 0..1 (линейный, 1 = 0 дБ). Берётся из RTP-расширения audio-level,
+   * которое заполняет отправитель: не зависит от того, куда и с какой громкостью звук выводится у нас.
+   */
+  remoteVoiceLevel() {
+    const source = this.voiceT?.receiver.getSynchronizationSources()[0];
+    if (!source || performance.timeOrigin + performance.now() - source.timestamp > 500) return 0;
+    return source.audioLevel ?? 0;
   }
 
   onTrack(event) {

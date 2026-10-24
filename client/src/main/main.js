@@ -6,14 +6,18 @@
  *  - фиксирует диапазон UDP-портов WebRTC, чтобы его можно было пробросить на роутере;
  *  - отдаёт интерфейс по собственному протоколу app://local (нужен для module worker и wasm);
  *  - выбирает источник захвата экрана/окна и системный звук (loopback) для getDisplayMedia;
- *  - читает/пишет stream.config.json.
+ *  - читает/пишет stream.config.json;
+ *  - глобальные горячие клавиши (src/main/hotkeys.js) пересылает интерфейсу;
+ *  - обновляется из GitHub Releases (src/main/updater.js).
  */
-const { app, BrowserWindow, desktopCapturer, ipcMain, protocol, session, shell, Menu } = require('electron');
+const { app, BrowserWindow, desktopCapturer, ipcMain, net, protocol, session, shell, Menu } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { loadConfig, saveConfig } = require('./config');
 const { NativeCapture } = require('./native-capture');
 const { EmbeddedServer } = require('./embedded-server');
+const { Hotkeys } = require('./hotkeys');
+const { Updater } = require('./updater');
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 const RENDERER_ROOT = path.join(APP_ROOT, 'src', 'renderer');
@@ -33,6 +37,23 @@ const profile = argValue('profile');
 if (profile) {
   const safe = profile.replace(/[^\w-]/g, '_');
   app.setPath('userData', path.join(app.getPath('appData'), `DuoStream-${safe}`));
+} else if (!app.isPackaged) {
+  // Запуск из исходников не делит папку данных с установленным DuoStream.exe
+  app.setPath('userData', path.join(app.getPath('appData'), 'DuoStream-dev'));
+}
+
+// Один экземпляр на папку данных: второй делил бы кэш Chromium (ошибки «Unable to move the cache»)
+// и порт сервера. Повторный запуск просто показывает уже открытое окно. Для второго окна на одном
+// ПК (проверка «стример + зритель») — запуск с --profile=<имя>.
+const singleInstance = app.requestSingleInstanceLock();
+if (!singleInstance) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  });
 }
 
 function resolveConfigPath() {
@@ -85,6 +106,11 @@ let current = { config: null, error: null };
 let pendingCapture = null;
 const nativeCapture = new NativeCapture();
 const embeddedServer = new EmbeddedServer();
+const sendToWindow = (channel, payload) => {
+  if (mainWindow && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(channel, payload);
+};
+const hotkeys = new Hotkeys((action, phase) => sendToWindow('hotkey', { action, phase }));
+const updater = new Updater((state) => sendToWindow('update', state));
 
 function registerAppProtocol() {
   protocol.handle('app', async (request) => {
@@ -168,7 +194,39 @@ function registerIpc() {
     if (!isTrustedSender(event)) throw new Error('forbidden');
     current = { config: saveConfig(configPath, cfg), error: null };
     if (mainWindow) applyNetworkPolicy(mainWindow.webContents);
+    hotkeys.update(current.config.hotkeys);
+    updater.configure(current.config.app.autoUpdate);
     return current.config;
+  });
+
+  ipcMain.handle('update:status', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return updater.status();
+  });
+
+  ipcMain.handle('update:install', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    updater.install();
+  });
+
+  // Назначение горячей клавиши: следующее нажатие (в любом окне) становится привязкой
+  ipcMain.handle('hotkeys:record', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return hotkeys.record();
+  });
+
+  ipcMain.handle('hotkeys:cancel', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    hotkeys.cancelRecord();
+  });
+
+  // Горячая клавиша трансляции: показать окно, чтобы выбрать экран
+  ipcMain.handle('app:focus', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
   });
 
   ipcMain.handle('config:open', async (event) => {
@@ -250,6 +308,20 @@ function registerIpc() {
     nativeCapture.stop(Number.isInteger(session) ? session : undefined);
   });
 
+  // Внешний IP так, как его видят TCP-подключения из интернета (тем же путём зритель идёт
+  // к сигнальному серверу). STUN бывает не годится: провайдер или роутер может уводить UDP
+  // к серверам Google через другой адрес, и тогда srflx-кандидат указывает не на ваш роутер.
+  ipcMain.handle('net:public-ip', async (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    try {
+      const response = await net.fetch('https://api.ipify.org', { signal: AbortSignal.timeout(5000) });
+      const ip = (await response.text()).trim();
+      return /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) ? ip : null;
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle('app:info', async (event) => {
     if (!isTrustedSender(event)) throw new Error('forbidden');
     return {
@@ -259,6 +331,8 @@ function registerIpc() {
       gpuFeatures: app.getGPUFeatureStatus(),
       udpPortRange: mainWindow?.webContents.getWebRTCUDPPortRange(),
       nativeCapture: nativeCapture.status(),
+      hotkeys: hotkeys.status(),
+      update: updater.status(),
       profile: profile ?? null,
     };
   });
@@ -310,6 +384,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  if (!singleInstance) return;
   configPath = resolveConfigPath();
   current = loadConfig(configPath, CONFIG_TEMPLATE);
   if (current.error) console.error(current.error);
@@ -319,10 +394,18 @@ app.whenReady().then(() => {
   setupPermissions();
   registerIpc();
   createWindow();
+  try {
+    hotkeys.update(current.config.hotkeys);
+  } catch (err) {
+    console.error('[hotkeys]', err);
+  }
+  // Проверка обновлений — когда окно уже загрузилось и может показать уведомление
+  mainWindow.webContents.once('did-finish-load', () => updater.configure(current.config.app.autoUpdate));
 });
 
 app.on('window-all-closed', () => app.quit());
 app.on('before-quit', () => {
+  hotkeys.stop();
   nativeCapture.stop();
   embeddedServer.stop();
 });

@@ -24,6 +24,27 @@ contextBridge.exposeInMainWorld('duo', {
   listSources: () => ipcRenderer.invoke('capture:list-sources'),
   selectSource: (source, audio) => ipcRenderer.invoke('capture:select', { id: source.id, name: source.name, audio }),
   getAppInfo: () => ipcRenderer.invoke('app:info'),
+  getPublicIp: () => ipcRenderer.invoke('net:public-ip'),
+  focusWindow: () => ipcRenderer.invoke('app:focus'),
+  update: {
+    status: () => ipcRenderer.invoke('update:status'),
+    /** Перезапуск с новой версией (установленная) или страница загрузки (portable) */
+    install: () => ipcRenderer.invoke('update:install'),
+    onState: (cb) => {
+      ipcRenderer.removeAllListeners('update');
+      ipcRenderer.on('update', (_event, state) => cb(state));
+    },
+  },
+  hotkeys: {
+    /** → {binding} | {cleared:true} | null (Esc / тайм-аут) */
+    record: () => ipcRenderer.invoke('hotkeys:record'),
+    cancel: () => ipcRenderer.invoke('hotkeys:cancel'),
+    /** cb({action, phase:'down'|'up'}) */
+    onAction: (cb) => {
+      ipcRenderer.removeAllListeners('hotkey');
+      ipcRenderer.on('hotkey', (_event, e) => cb(e));
+    },
+  },
   server: {
     start: (port, password) => ipcRenderer.invoke('server:start', { port, password }),
     stop: () => ipcRenderer.invoke('server:stop'),

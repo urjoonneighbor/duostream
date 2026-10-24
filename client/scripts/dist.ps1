@@ -1,8 +1,12 @@
 ﻿# Сборка установщика и portable-версии DuoStream: npm run dist
 #  1. собирает собственный захват (нужен .NET SDK 10);
-#  2. скачивает инструменты electron-builder (7-Zip, NSIS) через PowerShell с проверкой SHA-256 —
+#  2. ставит Electron, если он ещё не скачан (scripts/ensure-electron.ps1);
+#  3. скачивает инструменты electron-builder (7-Zip, NSIS) через PowerShell с проверкой SHA-256 —
 #     загрузка из Node с GitHub на некоторых сетях обрывается (RequestError) — и кладёт их в build-tools/;
-#  3. запускает electron-builder. Результат — в dist/.
+#  4. запускает electron-builder. Результат — в dist/.
+# С ключом -Publish (так вызывает .github/workflows/release.yml) сборка ещё и публикуется в GitHub
+# Releases — нужен токен в GH_TOKEN. Без ключа ничего никуда не отправляется.
+param([switch]$Publish)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $tools = Join-Path $root 'build-tools'
@@ -33,11 +37,12 @@ function Get-Tool($asset, $sevenZip) {
 Set-Location $root
 node scripts/build-native.mjs
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
+& (Join-Path $PSScriptRoot 'ensure-electron.ps1') -Root $root
 
 $sevenZip = (Get-ChildItem (Get-Tool $assets.sevenZip) -Recurse -Filter '7za.exe' | Select-Object -First 1).FullName
 $env:ELECTRON_BUILDER_7ZIP_PATH = $sevenZip
 $env:ELECTRON_BUILDER_NSIS_DIR = Get-Tool $assets.nsis $sevenZip
 $env:ELECTRON_BUILDER_NSIS_RESOURCES_DIR = Get-Tool $assets.nsisResources $sevenZip
 
-npx electron-builder --win nsis portable
+npx electron-builder --win nsis portable --publish $(if ($Publish) { 'always' } else { 'never' })
 exit $LASTEXITCODE
