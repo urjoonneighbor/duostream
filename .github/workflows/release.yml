@@ -56,10 +56,8 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           node scripts/test-denoiser.mjs --model=dtln
 
-      - name: Сборка и публикация
+      - name: Сборка
         working-directory: client
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $pkg = Get-Content package.json -Raw | ConvertFrom-Json
           $major, $minor = $pkg.version.Split('.')[0..1]
@@ -67,4 +65,19 @@ jobs:
           npm version $version --no-git-tag-version --allow-same-version
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Write-Host "Версия $version"
-          ./scripts/dist.ps1 -Publish
+          "VERSION=$version" >> $env:GITHUB_ENV
+          ./scripts/dist.ps1
+
+      # Один вызов gh: создаёт релиз черновиком, загружает файлы и публикует — тег v<версия> ставится
+      # на собранный коммит. latest.yml нужен автообновлению (client/src/main/updater.js).
+      - name: Публикация релиза
+        working-directory: client/dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $v = $env:VERSION
+          gh release create "v$v" `
+            "DuoStream-Setup-$v.exe" "DuoStream-Setup-$v.exe.blockmap" "latest.yml" "DuoStream-$v-portable.exe" `
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" `
+            --title "DuoStream $v" --generate-notes
+          exit $LASTEXITCODE
