@@ -182,6 +182,10 @@ export function createSignalingServer(config, { WebSocketServer, log = defaultLo
     maxPayload: cfg.maxMessageBytes,
     perMessageDeflate: false,
   });
+  // ws пересылает сюда ошибки httpServer (например, EADDRINUSE). Без обработчика это необработанное
+  // исключение — во встроенном сервере оно роняет главный процесс приложения. Ошибку запуска
+  // и так получает listen().
+  wss.on('error', (err) => log(`Ошибка сервера: ${err.message}`));
 
   const send = (ws, msg) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));

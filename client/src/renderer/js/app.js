@@ -161,7 +161,14 @@ async function startHostedServer(port, password) {
   const weak = /^password: (.+?) \(config\.json/.exec(result.error ?? '');
   if (weak) throw new Error(`${weak[1]}. Нажмите «Сгенерировать» — получится надёжный пароль`);
   if (!result.ok && result.code !== 'EADDRINUSE') throw new Error(`встроенный сервер не запустился: ${result.error}`);
-  if (!result.ok) toast(`Порт ${port} уже занят — подключаюсь к уже запущенному серверу`, 'warn', 7000);
+  if (!result.ok) {
+    toast(
+      `Порт ${port} занят другим сервером (например, запущенным отдельно node src/server.js) — подключаюсь к нему. ` +
+        'Если пароль «неверный», закройте тот сервер или смените порт.',
+      'warn',
+      12000,
+    );
+  }
   state.hostedServer = { port, own: result.ok };
 }
 
@@ -578,7 +585,7 @@ function onNativeEvent(e) {
   const capture = state.capture;
   if (capture?.engine !== 'native' || capture.native.session !== e.session) return;
   if (e.type === 'stats') {
-    state.nativeStats = e;
+    state.nativeStats = { ...e, write: capture.native.takeWriteStats() };
   } else if (e.type === 'size') {
     // Окно изменило размер
     Object.assign(capture, { width: e.width, height: e.height });
@@ -642,8 +649,11 @@ function captureSummary() {
   if (!c) return '—';
   if (c.engine === 'chromium') return 'Chromium (getDisplayMedia)';
   const s = state.nativeStats;
+  // Где стоят кадры, если текстуры кончаются: доставка в окно (занят интерфейс) или запись в трек (энкодер)
+  const ms = (avg, max) => `${avg.toFixed(1)} мс (макс ${max.toFixed(0)})`;
   const perf = s
-    ? ` · ${s.fps.toFixed(0)} к/с, копирование ${s.copyMs.toFixed(2)} мс, пропущено ${s.dropped}, текстур в работе ${s.inFlight}`
+    ? ` · ${s.fps.toFixed(0)} к/с, копирование ${s.copyMs.toFixed(2)} мс, пропущено ${s.dropped}, текстур в работе ${s.inFlight}` +
+      `, доставка в окно ${ms(s.deliverMs ?? 0, s.deliverMaxMs ?? 0)}, запись в трек ${ms(s.write.avgMs, s.write.maxMs)}`
     : '';
   return `собственный (WGC)${perf}`;
 }
@@ -1104,6 +1114,7 @@ function render() {
   const video = $('#video');
   if (video.srcObject !== videoStream) video.srcObject = videoStream;
   video.hidden = !videoStream;
+  video.classList.toggle('remote', !streamer && Boolean(videoStream));
   $('#previewBadge').hidden = !(streamer && videoStream);
 
   $('#connectCard').hidden = connected;
