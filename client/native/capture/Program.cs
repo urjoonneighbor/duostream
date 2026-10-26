@@ -11,7 +11,8 @@
 //
 // stdout, строки JSON:
 //   {"type":"ready","gen":G,"width":W,"height":H,"handles":["…"],"adapter":"…"} — новое кольцо текстур W×H
-//   {"type":"frame","gen":G,"i":слот,"ts":мкс,"w":ширина кадра,"h":высота кадра}
+//   {"type":"frame","gen":G,"i":слот,"ts":мкс,"w":ширина кадра,"h":высота кадра} — новый кадр или
+//                  повтор последнего, если источник не менялся 100 мс
 //   {"type":"stats","fps":…,"dropped":…,"copyMs":…}                       — раз в 2 с
 //   {"type":"closed"} — источник закрыт;  {"type":"error","message":"…"} — фатальная ошибка
 // stdin:
@@ -87,6 +88,12 @@ static unsafe class Program
     static readonly object gpuLock = new();
     static readonly object outLock = new();
     static int nextGen;
+
+    // Последний отправленный кадр — для повтора, пока источник не меняется (под gpuLock)
+    const int RepeatMs = 100;
+    static Ring lastRing;
+    static int lastSlot = -1, lastW, lastH;
+    static long lastEmit, lastTs;
 
     static void** VTable(IntPtr p) => *(void***)p;
     static void Check(int hr, string what) { if (hr < 0) throw new Exception($"{what}: 0x{hr:X8}"); }
@@ -210,6 +217,74 @@ static unsafe class Program
         ring = r;
         var handles = string.Join(",", r.RemoteHandles.Select(h => $"\"{h}\""));
         Emit($"{{\"type\":\"ready\",\"gen\":{r.Gen},\"width\":{width},\"height\":{height},\"handles\":[{handles}],\"adapter\":\"{Esc(adapterName)}\"}}");
+    }
+
+    /// <summary>Копирует левый верхний угол w×h и ждёт конца копирования: Chromium читает текстуру на своём устройстве.</summary>
+    static void CopyAndWait(IntPtr dst, IntPtr src, int w, int h)
+    {
+        var box = new Box { Right = (uint)w, Bottom = (uint)h, Back = 1 };
+        ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, uint, uint, uint, IntPtr, uint, Box*, void>)VTable(context)[46])(
+            context, dst, 0, 0, 0, 0, src, 0, &box); // CopySubresourceRegion
+        ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, void>)VTable(context)[28])(context, query);  // End
+        ((delegate* unmanaged[Stdcall]<IntPtr, void>)VTable(context)[111])(context);                // Flush
+        int done = 0;
+        while (((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int*, uint, uint, int>)VTable(context)[29])(context, query, &done, 4, 0) == 1)
+            Thread.SpinWait(20); // GetData
+    }
+
+    /// <summary>Сообщает Electron о готовом кадре. Вызывается под gpuLock.</summary>
+    static void EmitFrame(Ring r, int slot, long tsMicros, int w, int h)
+    {
+        // Метки времени только растут: кадр с меньшей меткой WebRTC выбросит (повтор мог успеть раньше)
+        long ts = Math.Max(tsMicros, lastTs + 1);
+        Emit($"{{\"type\":\"frame\",\"gen\":{r.Gen},\"i\":{slot},\"ts\":{ts},\"w\":{w},\"h\":{h}}}");
+        (lastRing, lastSlot, lastW, lastH, lastTs, lastEmit) = (r, slot, w, h, ts, Stopwatch.GetTimestamp());
+    }
+
+    static long QpcMicroseconds() => (long)(Stopwatch.GetTimestamp() * (1_000_000.0 / Stopwatch.Frequency));
+
+    /// <summary>Свободная текстура кольца, но не busy (источник копии). Вызывается под gpuLock.</summary>
+    static bool TryTakeOtherSlot(Ring r, int busy, out int slot)
+    {
+        for (int n = r.Free.Count; n > 0; n--)
+        {
+            if (!r.Free.TryDequeue(out slot)) break;
+            if (slot != busy) return true;
+            r.Free.Enqueue(slot);
+        }
+        slot = -1;
+        return false;
+    }
+
+    /// <summary>
+    /// WGC присылает кадр, только когда картинка изменилась: со статичного окна приходит один кадр и всё.
+    /// Энкодеру тогда нечего кодировать, и если ключевой кадр потерялся или пришёл битым, зритель ждёт
+    /// до первого изменения в окне — его запрос ключевого кадра (PLI) выполнить не из чего. Поэтому,
+    /// пока новых кадров нет, последний повторяется 10 раз в секунду. Копией в другую текстуру кольца:
+    /// ту же текстуру с новой меткой времени Chromium отбрасывает как дубликат.
+    /// </summary>
+    static void RepeatLastFrame()
+    {
+        long interval = Stopwatch.Frequency * RepeatMs / 1000;
+        while (true)
+        {
+            Thread.Sleep(RepeatMs / 2);
+            try
+            {
+                lock (gpuLock)
+                {
+                    var r = ring;
+                    if (lastRing != r || lastSlot < 0 || Stopwatch.GetTimestamp() - lastEmit < interval) continue;
+                    if (!TryTakeOtherSlot(r, lastSlot, out int slot)) continue; // все текстуры заняты — повторим позже
+                    CopyAndWait(r.Textures[slot], r.Textures[lastSlot], lastW, lastH);
+                    EmitFrame(r, slot, QpcMicroseconds(), lastW, lastH);
+                }
+            }
+            catch (Exception e)
+            {
+                Fail(e.Message);
+            }
+        }
     }
 
     static void ReadCommands()
@@ -360,19 +435,11 @@ static unsafe class Program
                     var tiid = textureIid;
                     Check(((delegate* unmanaged[Stdcall]<IntPtr, Guid*, IntPtr*, int>)VTable(access)[3])(access, &tiid, &source), "GetInterface");
                     Marshal.Release(access);
-                    var box = new Box { Right = (uint)w, Bottom = (uint)h, Back = 1 };
-                    ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, uint, uint, uint, uint, IntPtr, uint, Box*, void>)VTable(context)[46])(
-                        context, r.Textures[slot], 0, 0, 0, 0, source, 0, &box); // CopySubresourceRegion
+                    CopyAndWait(r.Textures[slot], source, w, h);
                     Marshal.Release(source);
-                    // Дожидаемся окончания копирования: Chromium читает текстуру на своём устройстве
-                    ((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, void>)VTable(context)[28])(context, query);  // End
-                    ((delegate* unmanaged[Stdcall]<IntPtr, void>)VTable(context)[111])(context);                // Flush
-                    int done = 0;
-                    while (((delegate* unmanaged[Stdcall]<IntPtr, IntPtr, int*, uint, uint, int>)VTable(context)[29])(context, query, &done, 4, 0) == 1)
-                        Thread.SpinWait(20); // GetData
                     copyTicks += Stopwatch.GetTimestamp() - started;
                     sent++;
-                    Emit($"{{\"type\":\"frame\",\"gen\":{r.Gen},\"i\":{slot},\"ts\":{t / 10},\"w\":{w},\"h\":{h}}}");
+                    EmitFrame(r, slot, t / 10, w, h); // SystemRelativeTime — тоже QPC, в единицах 100 нс
                 }
 
                 if (statsClock.ElapsedMilliseconds >= 2000)
@@ -390,6 +457,7 @@ static unsafe class Program
             }
         };
 
+        new Thread(RepeatLastFrame) { IsBackground = true }.Start();
         session.StartCapture();
         Thread.Sleep(Timeout.Infinite);
     }

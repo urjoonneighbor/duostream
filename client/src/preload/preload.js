@@ -46,7 +46,7 @@ contextBridge.exposeInMainWorld('duo', {
     },
   },
   server: {
-    start: (port, password) => ipcRenderer.invoke('server:start', { port, password }),
+    start: (port, password, allowedIps) => ipcRenderer.invoke('server:start', { port, password, allowedIps }),
     stop: () => ipcRenderer.invoke('server:stop'),
   },
   nativeCapture: {

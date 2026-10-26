@@ -1,5 +1,6 @@
 // Собственный захват (до 120 FPS): main присылает кадры-текстуры (sharedTexture), здесь из них
 // получаются VideoFrame на GPU и пишутся в MediaStreamTrackGenerator — обычный видеотрек для WebRTC.
+// Статичный источник процесс захвата сам повторяет 10 раз в секунду (см. RepeatLastFrame в Program.cs).
 
 const bridge = () => window.duo.nativeCapture;
 

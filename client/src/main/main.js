@@ -264,9 +264,10 @@ function registerIpc() {
     if (!isTrustedSender(event)) throw new Error('forbidden');
     const port = Math.round(Number(request?.port));
     const password = String(request?.password ?? '');
+    const allowedIps = Array.isArray(request?.allowedIps) ? request.allowedIps.map(String) : [];
     if (!(port >= 1 && port <= 65535)) return { ok: false, error: 'некорректный порт' };
     try {
-      return { ok: true, ...(await embeddedServer.start({ port, password })) };
+      return { ok: true, ...(await embeddedServer.start({ port, password, allowedIps })) };
     } catch (err) {
       return { ok: false, code: err.code ?? null, error: err.message };
     }

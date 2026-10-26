@@ -38,7 +38,59 @@ export const DEFAULT_CONFIG = {
   authTimeoutSeconds: 10,
   authFailLimit: 5,
   authBanSeconds: 300,
+  // Кому можно подключаться: IP или подсети IPv4 вида 203.0.113.0/24. Пусто — всем (вход всё равно по паролю).
+  // С остальных адресов соединение рвётся сразу, сервер им ничего не отвечает. 127.0.0.1 разрешён всегда.
+  allowedIps: [],
 };
+
+/** Энтропия пароля, грубая оценка: длина × log2(размер алфавита по классам символов). */
+function passwordBits(password) {
+  const classes = [
+    [/[a-z]/, 26],
+    [/[A-Z]/, 26],
+    [/[0-9]/, 10],
+    [/[а-яё]/, 33],
+    [/[А-ЯЁ]/, 33],
+    [/[^a-zA-Z0-9а-яёА-ЯЁ]/, 33],
+  ];
+  const alphabet = classes.reduce((sum, [re, size]) => sum + (re.test(password) ? size : 0), 0);
+  return [...password].length * Math.log2(Math.max(alphabet, 2));
+}
+
+const COMMON_PASSWORDS = /^(?:qwerty|password|пароль|123456|111111|admin|letmein|iloveyou|йцукен|duostream)/i;
+
+/**
+ * Почему пароль слабый (null — подходит). Ориентир — 60 бит: например, 12 символов из букв разного
+ * регистра и цифр. Перебор после перехвата входа по сети (ws:// не шифруется) тогда нереален.
+ */
+export function passwordProblem(password) {
+  if (typeof password !== 'string' || password.length < 8) return 'пароль короче 8 символов';
+  if (new Set(password).size < 6) return 'в пароле меньше 6 разных символов';
+  if (COMMON_PASSWORDS.test(password)) return 'пароль начинается с распространённого слова';
+  if (passwordBits(password) < 60) {
+    return 'пароль слишком простой: нужно от 12 символов из букв разного регистра и цифр (или от 16 из одних маленьких букв)';
+  }
+  return null;
+}
+
+/** IPv4 или IPv4-подсеть «a.b.c.d/n» → проверка адреса; IPv6 — только точное совпадение. */
+function ipMatcher(entry) {
+  const text = String(entry).trim();
+  const m = /^(\d{1,3}(?:\.\d{1,3}){3})(?:\/(\d{1,2}))?$/.exec(text);
+  if (!m) return (ip) => ip.toLowerCase() === text.toLowerCase();
+  const bits = m[2] === undefined ? 32 : Math.min(32, Number(m[2]));
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  const toInt = (ip) => ip.split('.').reduce((n, part) => ((n << 8) | Number(part)) >>> 0, 0);
+  const net = (toInt(m[1]) & mask) >>> 0; // & даёт знаковое число, сравниваем беззнаковые
+  return (ip) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip) && (toInt(ip) & mask) >>> 0 === net;
+}
+
+export function isValidIpEntry(entry) {
+  const text = String(entry).trim();
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/.exec(text);
+  if (v4) return v4.slice(1, 5).every((p) => Number(p) <= 255) && (v4[5] === undefined || Number(v4[5]) <= 32);
+  return /^[0-9a-f:]+$/i.test(text) && text.includes(':');
+}
 
 const CLOSE = {
   AUTH_TIMEOUT: 4001,
@@ -55,7 +107,7 @@ function timestamp() {
 
 const defaultLog = (...args) => console.log(`[${timestamp()}]`, ...args);
 
-/** Читает config.json и накладывает переменные окружения DUO_HOST / DUO_PORT / DUO_PASSWORD. */
+/** Читает config.json и накладывает переменные окружения DUO_HOST / DUO_PORT / DUO_PASSWORD / DUO_ALLOWED_IPS. */
 export function loadConfig(file) {
   let fromFile = {};
   if (file && fs.existsSync(file)) {
@@ -65,14 +117,17 @@ export function loadConfig(file) {
   if (process.env.DUO_HOST) cfg.host = process.env.DUO_HOST;
   if (process.env.DUO_PORT) cfg.port = Number(process.env.DUO_PORT);
   if (process.env.DUO_PASSWORD) cfg.password = process.env.DUO_PASSWORD;
+  if (process.env.DUO_ALLOWED_IPS) cfg.allowedIps = process.env.DUO_ALLOWED_IPS.split(/[\s,]+/).filter(Boolean);
   return cfg;
 }
 
 export function validateConfig(cfg) {
   const problems = [];
-  if (typeof cfg.password !== 'string' || cfg.password.length < 8) {
-    problems.push('password: задайте общий пароль длиной от 8 символов (config.json или переменная DUO_PASSWORD)');
-  }
+  const weak = passwordProblem(cfg.password);
+  if (weak) problems.push(`password: ${weak} (config.json или переменная DUO_PASSWORD)`);
+  const ips = cfg.allowedIps ?? [];
+  if (!Array.isArray(ips)) problems.push('allowedIps: должен быть списком адресов');
+  else for (const entry of ips) if (!isValidIpEntry(entry)) problems.push(`allowedIps: некорректный адрес «${entry}»`);
   // 0 = любой свободный порт (используется в тестах)
   if (!Number.isInteger(cfg.port) || cfg.port < 0 || cfg.port > 65535) {
     problems.push(`port: некорректный порт ${cfg.port}`);
@@ -99,10 +154,27 @@ export function createSignalingServer(config, { WebSocketServer, log = defaultLo
   /** Сокеты, ответившие на последний ping */
   const aliveSockets = new WeakSet();
 
+  // Обычные HTTP-запросы (сканеры, браузер) получают пустой 404 — сервер себя не называет.
+  // Для проверки проброса порта этого достаточно: ошибка 404 вместо «не удаётся подключиться».
   const httpServer = http.createServer((req, res) => {
-    // Удобно для проверки проброса порта из браузера: http://<белый IP>:<порт>/
-    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
-    res.end('DuoStream signaling server: OK\n');
+    res.writeHead(404, { connection: 'close' });
+    res.end();
+  });
+
+  let allowed = cfg.allowedIps.map(ipMatcher);
+  const isAllowed = (ip) => !allowed.length || /^(127\.|::1$)/.test(ip) || allowed.some((match) => match(ip));
+  const lastRejectLog = new Map();
+  // Чужие адреса отсекаются на уровне TCP — до TLS/HTTP/WebSocket и проверки пароля
+  httpServer.on('connection', (socket) => {
+    const ip = (socket.remoteAddress ?? '?').replace(/^::ffff:/, '');
+    if (isAllowed(ip)) return;
+    socket.destroy();
+    const now = Date.now();
+    if (now - (lastRejectLog.get(ip) ?? 0) > 60_000) {
+      lastRejectLog.set(ip, now);
+      if (lastRejectLog.size > 1000) lastRejectLog.clear();
+      log(`Отклонено подключение с ${ip}: адреса нет в allowedIps`);
+    }
   });
 
   const wss = new WebSocketServer({
@@ -136,7 +208,8 @@ export function createSignalingServer(config, { WebSocketServer, log = defaultLo
     failures.set(ip, f);
   };
 
-  const peerInfo = (c) => (c ? { role: c.role, name: c.name } : null);
+  // Стример видит IP зрителя (это его сервер) — чтобы добавить его в allowedIps; зрителю IP стримера не нужен
+  const peerInfo = (c, to) => (c ? { role: c.role, name: c.name, ...(to?.role === 'streamer' ? { ip: c.ip } : {}) } : null);
 
   function handleHello(client, msg) {
     if (client.role) return fail(client, 'already-authenticated', 'Повторный hello');
@@ -167,8 +240,8 @@ export function createSignalingServer(config, { WebSocketServer, log = defaultLo
     slots.set(client.role, client);
 
     const peer = slots.get(OTHER[client.role]) ?? null;
-    send(client.ws, { type: 'welcome', role: client.role, peer: peerInfo(peer) });
-    if (peer) send(peer.ws, { type: 'peer-joined', peer: peerInfo(client) });
+    send(client.ws, { type: 'welcome', role: client.role, peer: peerInfo(peer, client) });
+    if (peer) send(peer.ws, { type: 'peer-joined', peer: peerInfo(client, peer) });
     log(`${client.role} "${client.name}" вошёл с ${client.ip}${peer ? ` — пара собрана (${peer.role} "${peer.name}")` : ''}`);
   }
 
@@ -259,6 +332,15 @@ export function createSignalingServer(config, { WebSocketServer, log = defaultLo
   return {
     httpServer,
     wss,
+    /** Новый список allowedIps без перезапуска; уже подключённые с чужих адресов отключаются. */
+    setAllowedIps(list) {
+      const bad = list.filter((entry) => !isValidIpEntry(entry));
+      if (bad.length) throw new Error(`allowedIps: некорректный адрес «${bad[0]}»`);
+      allowed = list.map(ipMatcher);
+      for (const client of slots.values()) {
+        if (!isAllowed(client.ip)) client.ws.close(CLOSE.AUTH_FAILED, 'not-allowed');
+      }
+    },
     listen() {
       return new Promise((resolve, reject) => {
         httpServer.once('error', reject);

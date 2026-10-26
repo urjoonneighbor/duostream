@@ -248,6 +248,7 @@ textarea {
   display: flex;
   gap: 8px;
 }
+.with-button input,
 .with-button select {
   flex: 1;
   min-width: 0;

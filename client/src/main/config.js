@@ -11,6 +11,8 @@ const DEFAULTS = Object.freeze({
     displayName: '',
     hostServer: true,
     serverPort: 8787,
+    allowedIps: [], // встроенный сервер: кому можно подключаться (IP или подсеть IPv4 a.b.c.d/n); пусто — всем
+
   },
   video: {
     width: 2560,
@@ -132,6 +134,9 @@ function sanitize(input) {
   // Стример: запускать сигнальный сервер внутри приложения (отдельный Node.js не нужен)
   c.signaling.hostServer = bool(c.signaling.hostServer, d.signaling.hostServer);
   c.signaling.serverPort = clampInt(c.signaling.serverPort, 1, 65535, d.signaling.serverPort);
+  c.signaling.allowedIps = Array.isArray(c.signaling.allowedIps)
+    ? [...new Set(c.signaling.allowedIps.map((ip) => str(String(ip))).filter((ip) => /^[0-9a-fA-F.:/]{2,49}$/.test(ip)))].slice(0, 32)
+    : [];
 
   const v = c.video;
   // 0×0 = нативное разрешение источника

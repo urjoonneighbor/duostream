@@ -6,7 +6,8 @@
     "role": "streamer",
     "displayName": "",
     "hostServer": true,
-    "serverPort": 8787
+    "serverPort": 8787,
+    "allowedIps": []
   },
   "video": {
     "width": 2560,
