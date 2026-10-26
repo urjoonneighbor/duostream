@@ -43,10 +43,13 @@
             <span>Сигнальный сервер</span>
             <input id="fUrl" placeholder="ws://203.0.113.10:8787" spellcheck="false" />
           </label>
-          <label class="field">
-            <span>Пароль комнаты</span>
-            <input id="fPassword" type="password" required minlength="8" />
-          </label>
+          <div class="field">
+            <label for="fPassword">Пароль комнаты</label>
+            <div class="with-button">
+              <input id="fPassword" type="password" required minlength="8" autocomplete="off" />
+              <button type="button" id="btnGenPassword" title="Случайный надёжный пароль — скопируется, передайте его зрителю">Сгенерировать</button>
+            </div>
+          </div>
           <label class="field">
             <span>Имя</span>
             <input id="fName" maxlength="64" placeholder="Как вас показать собеседнику" />
@@ -255,8 +258,8 @@
           </div>
           <label class="check"><input type="checkbox" id="sSystemAudio" /><span>Стример: по умолчанию передавать системный звук</span></label>
           <p class="hint">
-            Системный звук захватывается целиком с устройства вывода по умолчанию. Чтобы зритель не слышал
-            сам себя, выберите для голоса собеседника другое устройство вывода (например, гарнитуру).
+            Системный звук захватывается в стерео с устройства вывода по умолчанию — без звуков самого DuoStream,
+            поэтому голос зрителя в трансляцию не попадает и он не слышит сам себя.
           </p>
           <p class="hint">
             Не слышно собеседника? Нажмите «Проверить»: если сигнала нет, выберите устройство, к которому
@@ -272,6 +275,18 @@
           <div class="row">
             <label class="field"><span>Диапазон UDP-портов WebRTC: от</span><input id="sPortMin" type="number" min="0" max="65535" /></label>
             <label class="field"><span>до</span><input id="sPortMax" type="number" min="0" max="65535" /></label>
+          </div>
+          <div class="field">
+            <label for="sAllowedIps">Стример: пускать на сервер только эти IP (через пробел или с новой строки; подсеть — 203.0.113.0/24; пусто — всех)</label>
+            <textarea id="sAllowedIps" rows="2" spellcheck="false" placeholder="203.0.113.7"></textarea>
+            <div class="with-button" id="allowViewerRow" hidden>
+              <span class="hint" id="allowViewerText"></span>
+              <button type="button" id="btnAllowViewer">Добавить</button>
+            </div>
+            <p class="hint">
+              С остальных адресов соединение рвётся сразу, сервер им ничего не отвечает. Если IP зрителя меняется
+              (динамический у провайдера), добавьте подсеть или оставьте поле пустым — вход всё равно по паролю.
+            </p>
           </div>
           <label class="field">
             <span>Белый IP стримера (необязательно — определяется автоматически)</span>

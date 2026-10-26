@@ -22,14 +22,20 @@ class EmbeddedServer {
     this.password = null;
   }
 
-  /** @returns {Promise<{port:number, lan:string[]}>} */
-  async start({ port, password }) {
+  /**
+   * Запускает сервер или, если он уже работает с тем же портом и паролем, только обновляет allowedIps.
+   * @returns {Promise<{port:number, lan:string[]}>}
+   */
+  async start({ port, password, allowedIps = [] }) {
     const mod = await import(pathToFileURL(serverModulePath()).href);
-    if (this.server && this.port === port && this.password === password) return { port, lan: mod.lanAddresses() };
+    if (this.server && this.port === port && this.password === password) {
+      this.server.setAllowedIps(allowedIps);
+      return { port, lan: mod.lanAddresses() };
+    }
     await this.stop();
 
     const server = mod.createSignalingServer(
-      { host: '0.0.0.0', port, password },
+      { host: '0.0.0.0', port, password, allowedIps },
       { WebSocketServer, log: (...args) => console.log('[server]', ...args) },
     );
     try {

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
+import os from 'node:os';
 import assert from 'node:assert/strict';
 import WebSocket, { WebSocketServer } from 'ws';
-import { createSignalingServer, validateConfig, PROTOCOL_VERSION } from '../src/server.js';
+import { createSignalingServer, validateConfig, passwordProblem, PROTOCOL_VERSION } from '../src/server.js';
 import { deriveKey, hmacHex, authMessage } from '../src/crypto.js';
 
 const PASSWORD = 'correct-horse-battery';
@@ -66,7 +67,8 @@ test('пара стример + зритель собирается и сигн�
       role: 'viewer',
       peer: { role: 'streamer', name: 'streamer-name' },
     });
-    assert.deepEqual(await streamer.next(), { type: 'peer-joined', peer: { role: 'viewer', name: 'viewer-name' } });
+    // Стример видит IP зрителя (для allowedIps), зритель IP стримера — нет
+    assert.deepEqual(await streamer.next(), { type: 'peer-joined', peer: { role: 'viewer', name: 'viewer-name', ip: '127.0.0.1' } });
 
     const signal = { type: 'signal', payload: '{"kind":"answer","sdp":"v=0"}', ts: 1234, sig: 'ab'.repeat(32) };
     viewer.send(signal);
@@ -153,7 +155,52 @@ test('сигнал без второго участника возвращает
   }
 });
 
-test('короткий пароль не принимается конфигурацией', () => {
+test('слабый пароль не принимается конфигурацией', () => {
   assert.equal(validateConfig({ password: 'short', port: 8787 }).length, 1);
   assert.equal(validateConfig({ password: 'long-enough-password', port: 8787 }).length, 0);
+  for (const weak of ['aaaaaaaaaaaaaaaa', 'qwerty2024!!AB', 'abcdefghij', '12345678901234']) assert.ok(passwordProblem(weak), weak);
+  for (const strong of ['Xk7pQ2mZ9rTb', 'синий-трактор-ест-луну', 'q8$Lm2!vR0zW']) assert.equal(passwordProblem(strong), null, strong);
+  assert.equal(validateConfig({ password: 'long-enough-password', port: 8787, allowedIps: ['10.0.0.0/8', '203.0.113.7'] }).length, 0);
+  assert.equal(validateConfig({ password: 'long-enough-password', port: 8787, allowedIps: ['300.1.1.1'] }).length, 1);
+});
+
+test('обычный HTTP-запрос получает пустой 404 — сервер себя не называет', async () => {
+  const { server, port } = await startServer();
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/`);
+    assert.equal(response.status, 404);
+    assert.equal(await response.text(), '');
+  } finally {
+    await server.close();
+  }
+});
+
+// Нужен адрес не 127.x: с него подключение не считается локальным
+const lanIp = Object.values(os.networkInterfaces()).flat().find((a) => a?.family === 'IPv4' && !a.internal)?.address;
+
+test('адрес не из allowedIps отключается до любого ответа, подсеть из списка пускается', { skip: !lanIp && 'нет сетевого IPv4' }, async () => {
+  const blocked = createSignalingServer(
+    { host: '0.0.0.0', port: 0, password: PASSWORD, allowedIps: ['203.0.113.5'] },
+    { WebSocketServer, log: () => {} },
+  );
+  const { port } = await blocked.listen();
+  try {
+    const status = await fetch(`http://${lanIp}:${port}/`).then((r) => r.status, () => 'отключено');
+    assert.equal(status, 'отключено');
+    const local = await fetch(`http://127.0.0.1:${port}/`); // локальный стример пускается всегда
+    assert.equal(local.status, 404);
+  } finally {
+    await blocked.close();
+  }
+  const subnet = lanIp.split('.').slice(0, 3).join('.') + '.0/24';
+  const open = createSignalingServer(
+    { host: '0.0.0.0', port: 0, password: PASSWORD, allowedIps: [subnet] },
+    { WebSocketServer, log: () => {} },
+  );
+  const opened = await open.listen();
+  try {
+    assert.equal((await fetch(`http://${lanIp}:${opened.port}/`)).status, 404);
+  } finally {
+    await open.close();
+  }
 });

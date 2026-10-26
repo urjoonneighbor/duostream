@@ -45,6 +45,11 @@ export class SettingsDialog {
 
     $('#btnSettingsCancel').addEventListener('click', () => this.dialog.close());
     for (const id of ['#sDenoise', '#sDenoiseModel']) $(id).addEventListener('change', () => this.updateDenoiseFields());
+    $('#sAllowedIps').addEventListener('input', () => this.updateAllowViewer());
+    $('#btnAllowViewer').addEventListener('click', () => {
+      $('#sAllowedIps').value = [...this.allowedIpsInput(), this.viewerIp].join('\n');
+      this.updateAllowViewer();
+    });
     $('#btnTestOutput').addEventListener('click', async () => {
       const button = $('#btnTestOutput');
       button.disabled = true;
@@ -87,8 +92,12 @@ export class SettingsDialog {
     });
   }
 
-  async open(cfg, configPath) {
+  /** @param {{viewerIp?:string|null}} [context] viewerIp — адрес подключённого зрителя (у стримера) */
+  async open(cfg, configPath, { viewerIp = null } = {}) {
     this.cfg = structuredClone(cfg);
+    $('#sAllowedIps').value = this.cfg.signaling.allowedIps.join('\n');
+    this.viewerIp = viewerIp;
+    this.updateAllowViewer();
     const { video: v, audio: a, network: n, playback: p } = this.cfg;
 
     setSelect($('#sResolution'), `${v.width}x${v.height}`, `${v.width} × ${v.height}`);
@@ -208,6 +217,18 @@ export class SettingsDialog {
     }
   }
 
+  allowedIpsInput() {
+    return [...new Set($('#sAllowedIps').value.split(/[\s,;]+/).filter(Boolean))];
+  }
+
+  /** Подсказка «Подключён зритель с … — Добавить», если его адреса ещё нет в списке */
+  updateAllowViewer() {
+    const ip = this.viewerIp;
+    const show = Boolean(ip) && !/^(127\.|::1$)/.test(ip) && !this.allowedIpsInput().includes(ip);
+    $('#allowViewerRow').hidden = !show;
+    if (show) $('#allowViewerText').textContent = `Сейчас подключён зритель с ${ip}`;
+  }
+
   /** Сила подавления и голосовой порог есть только у DeepFilterNet3 */
   updateDenoiseFields() {
     const on = $('#sDenoise').checked;
@@ -277,6 +298,7 @@ export class SettingsDialog {
     cfg.network.iceServers = [...(stun.length ? [{ urls: stun }] : []), ...this.cfg.network.iceServers.filter((s) => s.username)];
     cfg.network.udpPortRange = { min: num('#sPortMin'), max: num('#sPortMax') };
     cfg.network.publicIp = $('#sPublicIp').value.trim();
+    cfg.signaling.allowedIps = this.allowedIpsInput();
     cfg.network.turn = {
       enabled: $('#sTurnEnabled').checked,
       urls: $('#sTurnUrl').value.trim(),

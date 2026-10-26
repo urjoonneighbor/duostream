@@ -90,6 +90,7 @@ function updateConnectFields() {
   const streamer = selectedRole() === 'streamer';
   $('#fHostField').hidden = !streamer;
   $('#fPortField').hidden = !hostsServer();
+  $('#btnGenPassword').hidden = !hostsServer();
   $('#fUrlField').hidden = hostsServer();
   updateConnectHint();
 }
@@ -138,9 +139,27 @@ async function stunPublicIp(network) {
   }
 }
 
+/** 16 случайных символов без похожих (0/O, 1/l/I) — около 93 бит, перебрать нереально */
+async function generatePassword() {
+  const alphabet = 'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint32Array(16));
+  const password = Array.from(bytes, (b) => alphabet[b % alphabet.length]).join('');
+  const field = $('#fPassword');
+  field.value = password;
+  field.type = 'text'; // показываем: его нужно передать зрителю
+  try {
+    await navigator.clipboard.writeText(password);
+    toast('Пароль скопирован — передайте его зрителю', 'ok', 5000);
+  } catch {
+    toast('Пароль создан — передайте его зрителю', 'ok', 5000);
+  }
+}
+
 /** Запускает встроенный сервер; если порт уже занят (работает отдельный server/), подключаемся к нему. */
 async function startHostedServer(port, password) {
-  const result = await window.duo.server.start(port, password);
+  const result = await window.duo.server.start(port, password, state.cfg.signaling.allowedIps);
+  const weak = /^password: (.+?) \(config\.json/.exec(result.error ?? '');
+  if (weak) throw new Error(`${weak[1]}. Нажмите «Сгенерировать» — получится надёжный пароль`);
   if (!result.ok && result.code !== 'EADDRINUSE') throw new Error(`встроенный сервер не запустился: ${result.error}`);
   if (!result.ok) toast(`Порт ${port} уже занят — подключаюсь к уже запущенному серверу`, 'warn', 7000);
   state.hostedServer = { port, own: result.ok };
@@ -444,9 +463,24 @@ async function openCapture(pick, { forceChromium = false } = {}) {
     }
   }
   await window.duo.selectSource(pick.source, pick.audio);
-  const stream = await navigator.mediaDevices.getDisplayMedia({ video: captureConstraints(v), audio: pick.audio });
+  const stream = await navigator.mediaDevices.getDisplayMedia({
+    video: captureConstraints(v),
+    audio: pick.audio ? systemAudioConstraints() : false,
+  });
   const s = stream.getVideoTracks()[0].getSettings();
   return { stream, engine: 'chromium', width: s.width, height: s.height };
+}
+
+/**
+ * Системный звук (loopback). restrictOwnAudio — без звука самого DuoStream (Chromium берёт устройство
+ * loopbackWithoutChrome): иначе в трансляцию попадает голос зрителя, который играет у стримера, и зритель
+ * слышит сам себя. Обработка голоса (эхо-, шумоподавление, АРУ) звук игры только портит и сводит в моно.
+ * Если исключать свой звук Chromium не умеет — оставляем эхоподавление: оно хотя бы вычитает голос
+ * собеседника, пусть и не сразу (первые секунды трансляции голос пробивается).
+ */
+function systemAudioConstraints() {
+  if (!navigator.mediaDevices.getSupportedConstraints().restrictOwnAudio) return true;
+  return { restrictOwnAudio: true, echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2 };
 }
 
 /** Системный звук при собственном захвате: getDisplayMedia ради loopback-аудио, видео сразу останавливаем. */
@@ -455,7 +489,7 @@ async function addSystemAudio(stream, source) {
     await window.duo.selectSource(source, true);
     const loopback = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: 1, width: { max: 320 }, height: { max: 180 } },
-      audio: true,
+      audio: systemAudioConstraints(),
     });
     loopback.getVideoTracks().forEach((t) => t.stop());
     const track = loopback.getAudioTracks()[0];
@@ -513,7 +547,12 @@ async function beginCapture(pick, options) {
   }
 
   const engine = capture.engine === 'native' ? 'собственный захват' : 'захват Chromium';
-  const withAudio = stream.getAudioTracks().length ? ' · со звуком' : '';
+  const audioTrack = stream.getAudioTracks()[0];
+  const withAudio = !audioTrack
+    ? ''
+    : audioTrack.getSettings().restrictOwnAudio
+      ? ' · со звуком (без звука DuoStream)'
+      : ' · со звуком';
   toast(`Трансляция: ${pick.source.name} · ${width}×${height} · до ${v.frameRate} FPS · ${engine}${withAudio}`, 'ok');
   if (capture.engine === 'native') watchNativeFrames(capture);
   render();
@@ -903,6 +942,11 @@ async function saveSettings(next) {
   const cfg = state.cfg;
 
   if (state.mic) await state.mic.reconfigure(cfg.audio).catch((err) => toast(`Микрофон: ${err.message}`, 'error'));
+  // Список разрешённых IP встроенный сервер принимает на лету, без переподключения
+  if (state.hostedServer?.own && prev.signaling.allowedIps.join() !== cfg.signaling.allowedIps.join()) {
+    const result = await window.duo.server.start(state.hostedServer.port, cfg.signaling.password, cfg.signaling.allowedIps);
+    if (!result.ok) toast(`Список IP не применён: ${result.error}`, 'error', 8000);
+  }
   if (prev.audio.outputDeviceId !== cfg.audio.outputDeviceId) {
     await applySink($('#voiceAudio'));
     await applySink($('#systemAudio'));
@@ -1147,6 +1191,7 @@ function bindEvents() {
   $('#connectCard').addEventListener('submit', connect);
   for (const radio of document.querySelectorAll('input[name=role]')) radio.addEventListener('change', updateConnectFields);
   $('#fHostServer').addEventListener('change', updateConnectFields);
+  $('#btnGenPassword').addEventListener('click', generatePassword);
   $('#btnCopyAddress').addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(state.share?.address ?? '');
@@ -1169,7 +1214,9 @@ function bindEvents() {
   });
   $('#btnFullscreen').addEventListener('click', toggleFullscreen);
   $('#video').addEventListener('dblclick', toggleFullscreen);
-  $('#btnSettings').addEventListener('click', () => settingsDialog.open(state.cfg, state.configPath));
+  $('#btnSettings').addEventListener('click', () =>
+    settingsDialog.open(state.cfg, state.configPath, { viewerIp: state.role === 'streamer' ? state.peer?.ip : null }),
+  );
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.code === 'KeyM') {
       e.preventDefault();
