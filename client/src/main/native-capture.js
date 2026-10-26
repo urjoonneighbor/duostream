@@ -107,6 +107,8 @@ class NativeCapture {
       let lastSize = '';
       let sendErrors = 0;
       let inFlight = 0; // текстуры, которые ещё держат Electron/WebRTC
+      // Доставка кадра в окно: от отправки до конца обработки в preload (там же запись в видеотрек)
+      let deliver = { count: 0, totalMs: 0, maxMs: 0 };
 
       const finish = (error) => {
         clearTimeout(timer);
@@ -162,10 +164,15 @@ class NativeCapture {
               finish(new Error(`импорт текстуры не удался: ${err.message}`));
               return;
             }
+            const sentAt = performance.now();
             sharedTexture
               .sendSharedTexture({ frame: webContents.mainFrame, importedSharedTexture: texture }, session)
               .then(() => {
                 sendErrors = 0;
+                const ms = performance.now() - sentAt;
+                deliver.count++;
+                deliver.totalMs += ms;
+                deliver.maxMs = Math.max(deliver.maxMs, ms);
               })
               .catch((err) => {
                 if (++sendErrors >= MAX_SEND_ERRORS) finish(new Error(`окно не принимает кадры: ${err.message}`));
@@ -185,7 +192,17 @@ class NativeCapture {
             break;
           }
           case 'stats':
-            onEvent({ session, type: 'stats', fps: msg.fps, dropped: msg.dropped, copyMs: msg.copyMs, inFlight });
+            onEvent({
+              session,
+              type: 'stats',
+              fps: msg.fps,
+              dropped: msg.dropped,
+              copyMs: msg.copyMs,
+              inFlight,
+              deliverMs: deliver.count ? deliver.totalMs / deliver.count : 0,
+              deliverMaxMs: deliver.maxMs,
+            });
+            deliver = { count: 0, totalMs: 0, maxMs: 0 };
             break;
           case 'closed':
             clearTimeout(timer);

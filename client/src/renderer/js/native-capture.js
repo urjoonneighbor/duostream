@@ -18,6 +18,22 @@ export class NativeCaptureTrack {
     this.session = null;
     this.frames = 0;
     this.stopped = false;
+    this.writes = { count: 0, totalMs: 0, maxMs: 0 };
+  }
+
+  /** Сколько ждёт запись кадра в видеотрек: долго — не успевает энкодер (обратное давление трека) */
+  noteWrite(ms) {
+    const w = this.writes;
+    w.count++;
+    w.totalMs += ms;
+    w.maxMs = Math.max(w.maxMs, ms);
+  }
+
+  /** Средняя и максимальная задержка записи с прошлого вызова */
+  takeWriteStats() {
+    const w = this.writes;
+    this.writes = { count: 0, totalMs: 0, maxMs: 0 };
+    return { avgMs: w.count ? w.totalMs / w.count : 0, maxMs: w.maxMs };
   }
 
   /** @returns {Promise<MediaStream>} поток с одним видеотреком */
@@ -46,7 +62,9 @@ export class NativeCaptureTrack {
         if (this.frames % 120 === 0) {
           this.lastFrameInfo = `текстура ${frame.codedWidth}×${frame.codedHeight}, кадр ${frame.displayWidth}×${frame.displayHeight}`;
         }
+        const started = performance.now();
         await writer.write(frame);
+        this.noteWrite(performance.now() - started);
         this.frames++;
       } catch {
         // трек остановлен

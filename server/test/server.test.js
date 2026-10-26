@@ -204,3 +204,17 @@ test('адрес не из allowedIps отключается до любого �
     await open.close();
   }
 });
+
+test('занятый порт — ошибка listen(), а не необработанное исключение', async () => {
+  const first = await startServer();
+  const second = createSignalingServer(
+    { host: '127.0.0.1', port: first.port, password: PASSWORD },
+    { WebSocketServer, log: () => {} },
+  );
+  try {
+    await assert.rejects(second.listen(), { code: 'EADDRINUSE' });
+  } finally {
+    await second.close().catch(() => {});
+    await first.server.close();
+  }
+});
