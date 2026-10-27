@@ -318,9 +318,15 @@ static unsafe class Program
 
     static void Main(string[] args)
     {
+        var parsed = ParseArgs(args);
+        if (parsed.ContainsKey("audio-window"))
+        {
+            AppAudio.Run(parsed); // звук приложения транслируемого окна (AppAudio.cs)
+            return;
+        }
         try
         {
-            Run(ParseArgs(args));
+            Run(parsed);
         }
         catch (Exception e)
         {
@@ -414,9 +420,13 @@ static unsafe class Program
                 nextDue = Math.Max(nextDue + period, t);
 
                 var surface = frame.Surface.Description;
-                int w = Math.Min(content.Width, surface.Width) & ~1;
-                int h = Math.Min(content.Height, surface.Height) & ~1;
-                if (w < 2 || h < 2) return;
+                // Ширина и высота кратны 8 (обрезаем до 7 пикселей справа и снизу). Окно бывает любого размера,
+                // а при ширине, не кратной 4, у цветовой плоскости NV12 нечётная ширина — на ней аппаратные
+                // энкодеры, декодеры и копирование кадров ошибаются с шагом строки: картинка «съезжает»
+                // по диагонали копиями самой себя. Экраны 1920×1080 и 2560×1440 уже кратны 8.
+                int w = Math.Min(content.Width, surface.Width) & ~7;
+                int h = Math.Min(content.Height, surface.Height) & ~7;
+                if (w < 8 || h < 8) return;
 
                 lock (gpuLock)
                 {

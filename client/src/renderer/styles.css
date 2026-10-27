@@ -142,8 +142,7 @@ textarea {
 .logo {
   width: 22px;
   height: 22px;
-  border-radius: 6px;
-  background: linear-gradient(135deg, var(--accent), #9b5bff);
+  display: block;
 }
 .status {
   display: flex;
@@ -194,13 +193,6 @@ textarea {
   height: 100%;
   object-fit: contain;
   background: #000;
-}
-/* Видео собеседника у зрителя: непрозрачность не ровно 1 — Chromium не выносит его в аппаратный оверлей
-   (MPO), где на части ПК с NVIDIA декодированные кадры мигают без яркости (чёрный фон и цветные пятна).
-   Только у зрителя: у стримера композиция предпросмотра в GPU-процессе Chromium отнимает время
-   у подготовки кадров для энкодера (замерено: −15% FPS, а под нагрузкой игры — переполнение кольца захвата). */
-.stage video.remote {
-  opacity: 0.999;
 }
 .overlay {
   position: absolute;
@@ -356,6 +348,181 @@ textarea {
   font-size: 12px;
   backdrop-filter: blur(6px);
 }
+.peer-state {
+  display: inline-flex;
+  color: var(--poor);
+  margin-left: -4px;
+}
+.peer-state[hidden] {
+  display: none;
+}
+.peer-state .icon {
+  width: 16px;
+  height: 16px;
+}
+.stage.chat-open .hud {
+  right: 384px;
+}
+
+/* ---------- чат ---------- */
+.chat {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(13, 15, 19, 0.92);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  backdrop-filter: blur(6px);
+  z-index: 3;
+}
+.chat[hidden] {
+  display: none;
+}
+.chat header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.chat h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.chat header .hint {
+  flex: 1;
+}
+.chat-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  user-select: text;
+}
+.chat-item {
+  max-width: 88%;
+  align-self: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-item.mine {
+  align-self: flex-end;
+  background: #1d2a48;
+  border-color: #2b3d66;
+}
+.chat-item .meta {
+  color: var(--muted);
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+.chat-item.pending {
+  opacity: 0.6;
+}
+.chat-item .file-name {
+  font-weight: 600;
+}
+.chat-thumb {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  margin: 6px 0 4px;
+  border-radius: 6px;
+  cursor: zoom-in;
+  background: var(--bg);
+}
+.image-view {
+  max-width: 96vw;
+  max-height: 96vh;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: zoom-out;
+}
+.image-view::backdrop {
+  background: rgba(0, 0, 0, 0.85);
+}
+.image-view img {
+  display: block;
+  max-width: 96vw;
+  max-height: calc(96vh - 28px);
+  object-fit: contain;
+}
+.image-view-name {
+  color: #ddd;
+  font-size: 12px;
+  text-align: center;
+  padding-top: 6px;
+}
+.chat-item progress {
+  width: 100%;
+  height: 6px;
+  margin: 6px 0 2px;
+  accent-color: var(--accent);
+}
+.chat-item .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.chat-item .actions button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.chat-form {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+}
+.chat-form textarea {
+  flex: 1;
+  resize: none;
+  max-height: 120px;
+  font-family: inherit;
+  font-size: 13px;
+}
+.chat-toggle {
+  position: relative;
+}
+.chat-toggle .count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--poor);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+.stage.drop-target::after {
+  content: 'Отпустите, чтобы отправить файлы';
+  position: absolute;
+  inset: 12px;
+  display: grid;
+  place-items: center;
+  border: 2px dashed var(--accent);
+  border-radius: var(--radius);
+  background: rgba(13, 15, 19, 0.7);
+  font-size: 16px;
+  z-index: 5;
+}
 .hud h3 {
   margin: 0 0 8px;
   font-size: 13px;
@@ -384,6 +551,35 @@ dd {
   border-top: 1px solid var(--line);
   background: var(--panel);
 }
+/* Во весь экран: видео на всё окно, нижняя панель поверх него и прячется вместе с курсором */
+body.fs {
+  grid-template-rows: 1fr;
+}
+body.fs .topbar {
+  display: none;
+}
+body.fs .controls {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
+  border-top: none;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.55) 30%), color-mix(in srgb, var(--panel) 70%, transparent);
+  transition:
+    opacity 0.25s,
+    transform 0.25s;
+}
+body.fs.idle .controls {
+  opacity: 0;
+  transform: translateY(100%);
+  pointer-events: none;
+}
+body.fs.idle,
+body.fs.idle * {
+  cursor: none !important;
+}
+
 .group {
   display: flex;
   align-items: center;
@@ -658,6 +854,7 @@ legend {
   justify-content: flex-end;
   gap: 6px;
   margin-top: 8px;
+  pointer-events: auto; /* контейнер .toasts пропускает клики сквозь себя, кнопки — нет */
 }
 .toast-actions button {
   padding: 4px 10px;

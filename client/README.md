@@ -47,6 +47,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-electron.ps1
   клавишу». Действия выполняет интерфейс (`app.js` → `onHotkey`) и подтверждает звуком (`js/tones.js`).
 - **src/main/updater.js** — electron-updater: релизы GitHub, которые публикует
   `.github/workflows/release.yml`.
+- **src/renderer/img/icon.svg** — иконка приложения. `build/icon.ico` (exe, установщик, ярлыки) и
+  `src/renderer/img/icon-256.png` (окно) делаются из неё: `npx electron scripts/make-icons.cjs`.
 - **src/renderer/js/stats.js** — битрейт, пинг, потери, FPS, кодек, путь P2P/TURN.
 
 Отладка: F12 открывает DevTools, в консоли доступен `duoDebug` — состояние приложения

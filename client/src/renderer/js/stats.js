@@ -49,13 +49,15 @@ export class StatsMonitor {
           }
         : null,
       video: null,
-      audio: { outKbps: 0, inKbps: 0, inLossPct: null },
+      audio: { outKbps: 0, inKbps: 0, inLossPct: null, concealedPct: null },
       lossPct: null,
       quality: 'unknown',
     };
 
     let audioLost = 0;
     let audioReceived = 0;
+    let audioSamples = 0;
+    let audioConcealed = 0;
     for (const s of byId.values()) {
       if (s.type === 'outbound-rtp' && s.kind === 'video' && (s.framesEncoded ?? 0) > 0) {
         const ri = [...byId.values()].find((r) => r.type === 'remote-inbound-rtp' && r.localId === s.id);
@@ -101,9 +103,13 @@ export class StatsMonitor {
         result.audio.inKbps += (rate(s, 'bytesReceived') ?? 0) * 0.008;
         audioLost += Math.max(0, delta(s, 'packetsLost') ?? 0);
         audioReceived += delta(s, 'packetsReceived') ?? 0;
+        // Досочинённые приёмником отсчёты (пакет не пришёл вовремя): их много — в звуке треск и щелчки
+        audioSamples += delta(s, 'totalSamplesReceived') ?? 0;
+        audioConcealed += Math.max(0, (delta(s, 'concealedSamples') ?? 0) - (delta(s, 'silentConcealedSamples') ?? 0));
       }
     }
     if (audioReceived + audioLost > 0) result.audio.inLossPct = (audioLost / (audioReceived + audioLost)) * 100;
+    if (audioSamples > 0) result.audio.concealedPct = (audioConcealed / audioSamples) * 100;
 
     result.lossPct = result.video?.lossPct ?? result.audio.inLossPct;
     result.quality = evaluate(result);
@@ -199,7 +205,12 @@ export function describeStats(s, extra = {}) {
       lines.push(['Пропущено кадров / фризов', `${v.dropped} / ${v.freezes}`]);
     }
   }
-  lines.push(['Звук ↑ / ↓', `${formatKbps(s.audio.outKbps)} / ${formatKbps(s.audio.inKbps)}`]);
+  const concealed = s.audio.concealedPct;
+  lines.push([
+    'Звук ↑ / ↓',
+    `${formatKbps(s.audio.outKbps)} / ${formatKbps(s.audio.inKbps)}` +
+      (concealed >= 0.5 ? ` · досочинено ${concealed.toFixed(1)}% (треск: пакеты опаздывают или не успевает процессор)` : ''),
+  ]);
   for (const [k, val] of Object.entries(extra)) lines.push([k, val]);
   return lines;
 }

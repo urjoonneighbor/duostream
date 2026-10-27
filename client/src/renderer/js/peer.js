@@ -115,6 +115,7 @@ export class PeerSession extends EventTarget {
   logEvent(text) {
     const t = ((performance.now() - this.startedAt) / 1000).toFixed(0);
     this.diag.events.push(`${t} с: ${text}`);
+    console.log(`[ice] ${text}`);
     if (this.diag.events.length > 14) this.diag.events.shift();
   }
 
@@ -134,6 +135,7 @@ export class PeerSession extends EventTarget {
       sendEncodings: [{ maxBitrate: v.bitrateKbps * 1000, maxFramerate: v.frameRate, priority: 'high', networkPriority: 'high' }],
     });
     this.systemT = this.pc.addTransceiver('audio', { direction: 'sendonly' });
+    this.openDataChannels(); // после трансиверов: m=application — четвёртая секция, MLINE не сдвигается
     applyCodecPreferences(this.videoT, codecOrder);
     if (screenStream) await this.setScreen(screenStream, { scaleDownBy });
     await this.negotiate();
@@ -188,6 +190,25 @@ export class PeerSession extends EventTarget {
     return this.maxFrameArea > 0 && area > this.maxFrameArea;
   }
 
+  /**
+   * Новый видеоэнкодер без пересогласования: выключить кодирование (active=false) и включить снова.
+   * WebRTC при этом освобождает энкодер и создаёт его под текущий размер кадра.
+   */
+  async resetVideoEncoder() {
+    const sender = this.videoT?.sender;
+    if (!sender) return;
+    const toggle = async (active) => {
+      const params = sender.getParameters();
+      if (!params.encodings?.length) return;
+      for (const e of params.encodings) e.active = active;
+      await sender.setParameters(params);
+    };
+    await (this.paramsChain = this.paramsChain.then(() => toggle(false)).catch(() => {}));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await (this.paramsChain = this.paramsChain.then(() => toggle(true)).catch(() => {}));
+    this.logEvent('видеоэнкодер пересоздан');
+  }
+
   /** Фактический размер закодированного кадра (из статистики; getSettings() у окон врёт). */
   noteEncodedFrame(width, height) {
     this.maxFrameArea = Math.max(this.maxFrameArea, width * height);
@@ -217,6 +238,7 @@ export class PeerSession extends EventTarget {
 
   async handleOffer(msg) {
     this.forwardRange = msg.forwardRange ?? null;
+    if (!this.chatChannel) this.openDataChannels();
     await this.pc.setRemoteDescription({ type: 'offer', sdp: mungeRemoteSdp(msg.sdp, this.cfg, { sendsVideo: false }) });
     this.logEvent('offer получен');
     this.remoteDescriptionSet = true;
@@ -253,6 +275,17 @@ export class PeerSession extends EventTarget {
   }
 
   // ---------------- общее ----------------
+
+  /**
+   * Каналы чата (js/chat.js): сообщения и куски файлов. negotiated — номера каналов заданы заранее
+   * у обеих сторон, отдельное согласование не нужно.
+   */
+  openDataChannels() {
+    this.chatChannel = this.pc.createDataChannel('chat', { negotiated: true, id: 1, ordered: true });
+    this.fileChannel = this.pc.createDataChannel('file', { negotiated: true, id: 2, ordered: true });
+    this.fileChannel.binaryType = 'arraybuffer';
+    this.emit('datachannels', { chat: this.chatChannel, file: this.fileChannel });
+  }
 
   async setMicTrack(track) {
     this.micTrack = track;

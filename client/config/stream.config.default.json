@@ -20,7 +20,8 @@
     "contentHint": "motion",
     "degradationPreference": "maintain-framerate",
     "showPreview": true,
-    "captureEngine": "auto"
+    "captureEngine": "auto",
+    "renderer": "d3d11"
   },
   "audio": {
     "micDeviceId": "default",
@@ -35,14 +36,16 @@
     "captureSystemAudio": false,
     "systemAudioBitrateKbps": 160,
     "pushToTalk": false,
-    "pushToTalkReleaseMs": 150
+    "pushToTalkReleaseMs": 150,
+    "uiSounds": true
   },
   "hotkeys": {
     "toggleMute": { "key": 50, "ctrl": true, "shift": true, "alt": false, "meta": false, "label": "Ctrl + Shift + M" },
     "toggleDeafen": { "key": 32, "ctrl": true, "shift": true, "alt": false, "meta": false, "label": "Ctrl + Shift + D" },
     "pushToTalk": null,
     "toggleDenoise": null,
-    "toggleStream": null
+    "toggleStream": null,
+    "markGlitch": { "key": 34, "ctrl": true, "shift": true, "alt": false, "meta": false, "label": "Ctrl + Shift + G" }
   },
   "network": {
     "iceServers": [
@@ -56,12 +59,14 @@
     },
     "udpPortRange": { "min": 50000, "max": 50019 },
     "publicIp": "",
-    "forceRelay": false
+    "forceRelay": false,
+    "upnp": true
   },
   "playback": {
     "jitterBufferTargetMs": 0
   },
   "app": {
-    "autoUpdate": true
+    "autoUpdate": true,
+    "overlay": { "enabled": true, "corner": "top-left" }
   }
 }

@@ -1,11 +1,13 @@
 // Оффлайн-проверка шумодава тем же кодом, что работает в приложении
 // (src/renderer/audio/dfn-core.js и dtln-core.js).
 //
-//   node scripts/test-denoiser.mjs [речь.wav] [SNR дБ] [--model=dfn3|dtln] [--limit=дБ] [--noise=fan|keys] [--gate]
+//   node scripts/test-denoiser.mjs [речь.wav] [SNR дБ] [--model=dfn3|dtln] [--limit=дБ] [--noise=fan|keys|human|flush] [--gate]
 //
 // Без файла используется синтетический «голос» (DeepFilterNet3 справедливо считает его гудком и глушит —
 // для оценки передайте запись речи). --limit — предел подавления DeepFilterNet3 (0 — без предела),
-// --noise — фон вентилятора с гулом 50 Гц или щелчки клавиатуры.
+// --noise — фон вентилятора с гулом 50 Гц, щелчки клавиатуры, human — шмыганье и скрип кресла,
+// flush — смыв унитаза (поток воды с бульканьем).
+// --gate — голосовой порог по Silero VAD.
 // Результат пишется в test-output/: noisy.wav (вход), denoised.wav (выход) — их можно прослушать.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,6 +22,7 @@ import {
   SAMPLE_RATE,
 } from '../src/renderer/audio/dtln-core.js';
 import { DfnDenoiser, DFN_FRAME, VoiceGate } from '../src/renderer/audio/dfn-core.js';
+import { SileroVad } from '../src/renderer/audio/vad-core.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const modelsDir = path.join(root, 'src', 'renderer', 'models');
@@ -136,6 +139,71 @@ function keyboardClicks(n) {
   return out;
 }
 
+function humanNoises(n) {
+  // Звуки, которые шумодав принимает за голос: шмыганье (резкий полосовой шум, 250 мс)
+  // и скрип механизма кресла (тон с гармониками 700→1100 Гц с дрожанием, 400 мс), каждые 0,6–1,4 с
+  const out = new Float32Array(n);
+  for (let at = 4800; at < n; at += Math.round(SAMPLE_RATE * (0.6 + 0.8 * rand()))) {
+    if (rand() < 0.5) {
+      const len = 0.25 * SAMPLE_RATE;
+      let lp = 0;
+      for (let k = 0; k < len && at + k < n; k++) {
+        const env = k < 0.05 * SAMPLE_RATE ? k / (0.05 * SAMPLE_RATE) : Math.exp(-(k - 0.05 * SAMPLE_RATE) / (0.06 * SAMPLE_RATE));
+        const w = gauss();
+        lp = 0.7 * lp + 0.3 * w;
+        out[at + k] += 1.5 * env * (w - lp);
+      }
+    } else {
+      const len = 0.4 * SAMPLE_RATE;
+      let phase = 0;
+      for (let k = 0; k < len && at + k < n; k++) {
+        const t = k / SAMPLE_RATE;
+        phase += (2 * Math.PI * (700 + 1000 * t + 30 * Math.sin(2 * Math.PI * 9 * t))) / SAMPLE_RATE;
+        const env = Math.sin((Math.PI * k) / len) * (0.6 + 0.4 * Math.sin(2 * Math.PI * 13 * t));
+        let s = 0;
+        for (let h = 1; h <= 6; h++) s += Math.sin(h * phase) / h;
+        out[at + k] += env * s;
+      }
+    }
+  }
+  return out;
+}
+
+function toiletFlush(n) {
+  // Смыв унитаза: каждые 7 с поток воды на 4 с (полосовой шум 150–4000 Гц с турбулентной модуляцией),
+  // бульканье (пузыри — затухающие тоны 300–2000 Гц с восходящим тоном, ~40 в секунду) и низкий гул
+  const out = new Float32Array(n);
+  const len = 4 * SAMPLE_RATE;
+  for (let at = SAMPLE_RATE; at < n; at += 7 * SAMPLE_RATE) {
+    let lo = 0;
+    let hi = 0;
+    let mod = 0;
+    let rumble = 0;
+    for (let k = 0; k < len && at + k < n; k++) {
+      const t = k / SAMPLE_RATE;
+      const env = Math.min(1, t / 0.25) * (t > 2.5 ? Math.exp(-(t - 2.5) / 0.5) : 1);
+      const w = gauss();
+      hi = 0.55 * hi + 0.45 * w; // срез верхов ~4 кГц
+      lo = 0.98 * lo + 0.02 * hi; // срез низов ~150 Гц
+      mod = 0.999 * mod + 0.001 * gauss() * 30;
+      rumble = 0.995 * rumble + 0.005 * gauss();
+      out[at + k] += env * ((hi - lo) * (0.7 + 0.5 * Math.tanh(mod)) + 6 * rumble);
+    }
+    for (let b = 0; b < 160; b++) {
+      const start = at + Math.round(rand() * len * 0.9);
+      const f0 = 300 + 1700 * rand() ** 2;
+      const tau = (0.005 + 0.025 * rand()) * SAMPLE_RATE;
+      const amp = 0.3 + 0.7 * rand();
+      let phase = 0;
+      for (let k = 0; k < 6 * tau && start + k < n; k++) {
+        phase += (2 * Math.PI * f0 * (1 + (0.3 * k) / tau)) / SAMPLE_RATE;
+        out[start + k] += amp * Math.exp(-k / tau) * Math.sin(phase);
+      }
+    }
+  }
+  return out;
+}
+
 const energy = (x, from = 0, to = x.length) => {
   let e = 0;
   for (let i = from; i < to; i++) e += x[i] * x[i];
@@ -208,7 +276,15 @@ async function createDenoiser(model, limitDb, gate) {
   dfn.setAttenuationLimit(limitDb);
   if (!gate) return { denoiser: dfn, frame: DFN_FRAME };
   const voiceGate = new VoiceGate();
-  const denoiser = { process: async (frame) => voiceGate.process(await dfn.process(frame), dfn.lsnr) };
+  const vad = await SileroVad.create(ort, fs.readFileSync(path.join(modelsDir, 'silero', 'silero_vad.onnx')));
+  const denoiser = {
+    process: async (frame) => {
+      const prob = await vad.push(frame);
+      const out = await dfn.process(frame);
+      voiceGate.observe(frame, out);
+      return voiceGate.process(out, voiceGate.speechByVad(prob));
+    },
+  };
   return { denoiser, frame: DFN_FRAME };
 }
 
@@ -235,7 +311,9 @@ async function main() {
   }
   clean = clean.subarray(0, clean.length - (clean.length % frame));
 
-  const noise = flag('noise', 'fan') === 'keys' ? keyboardClicks(clean.length) : pinkishNoise(clean.length);
+  const noiseKind = flag('noise', 'fan');
+  const noise =
+    { keys: keyboardClicks, human: humanNoises, flush: toiletFlush }[noiseKind]?.(clean.length) ?? pinkishNoise(clean.length);
   const gain = Math.sqrt(energy(clean) / energy(noise) / 10 ** (snrDb / 10));
   const noisy = Float32Array.from(clean, (s, i) => s + gain * noise[i]);
 

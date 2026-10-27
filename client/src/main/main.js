@@ -8,7 +8,8 @@
  *  - выбирает источник захвата экрана/окна и системный звук (loopback) для getDisplayMedia;
  *  - читает/пишет stream.config.json;
  *  - глобальные горячие клавиши (src/main/hotkeys.js) пересылает интерфейсу;
- *  - обновляется из GitHub Releases (src/main/updater.js).
+ *  - обновляется из GitHub Releases (src/main/updater.js);
+ *  - открывает порты стримера на роутере через UPnP (src/main/upnp.js).
  */
 const { app, BrowserWindow, desktopCapturer, ipcMain, net, protocol, session, shell, Menu } = require('electron');
 const fs = require('node:fs');
@@ -18,6 +19,13 @@ const { NativeCapture } = require('./native-capture');
 const { EmbeddedServer } = require('./embedded-server');
 const { Hotkeys } = require('./hotkeys');
 const { Updater } = require('./updater');
+const { PortMapper } = require('./upnp');
+const { AppAudioCapture } = require('./app-audio');
+const { log } = require('./logger');
+const { Downloads, Uploads } = require('./downloads');
+const { Overlay } = require('./overlay');
+const { AppTray } = require('./tray');
+const os = require('node:os');
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 const RENDERER_ROOT = path.join(APP_ROOT, 'src', 'renderer');
@@ -49,11 +57,7 @@ const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  });
+  app.on('second-instance', () => tray.show());
 }
 
 function resolveConfigPath() {
@@ -79,6 +83,29 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 // На ПК/ноутбуках с двумя GPU просим дискретную видеокарту
 app.commandLine.appendSwitch('force_high_performance_gpu');
+// Без DirectComposition — значит, без аппаратных видеооверлеев (MPO). На части ПК с NVIDIA видео в оверлее
+// мигает кадрами без яркости (чёрный фон и цветные пятна), причём на скриншоте глюка нет: при захвате
+// экрана Windows перестаёт использовать оверлей. Сами кадры целые — это сбой вывода. Отдельного флага
+// только для видеооверлеев в Chromium 152 нет, поэтому выключаем DirectComposition целиком.
+app.commandLine.appendSwitch('disable-direct-composition');
+// Способ вывода видео (ниже) действует только с запуска, поэтому настройки читаются здесь, до app.ready.
+const startupConfig = (() => {
+  try {
+    return loadConfig(resolveConfigPath(), CONFIG_TEMPLATE).config;
+  } catch {
+    return null;
+  }
+})();
+// «Вывод видео у зрителя» (Видео): если картинка портится только на экране, а кадры целые («Отметить глюк»),
+// виноват путь вывода через видеокарту. Chromium рисует через ANGLE; по умолчанию это Direct3D 11,
+// можно выбрать OpenGL (окно рисует видеокарта, видео декодирует процессор — аппаратный декодер Chromium
+// работает только с D3D11) или Vulkan (в Chromium 152 на Windows окно рисует процессор), либо совсем без
+// видеокарты. Только у зрителя: стримеру нужен D3D11 — захват
+// отдаёт кадры текстурами D3D11, кодирует их видеокарта.
+const renderer = startupConfig?.signaling.role === 'viewer' ? startupConfig.video.renderer : 'd3d11';
+if (renderer === 'software') app.disableHardwareAcceleration();
+else if (renderer === 'opengl') app.commandLine.appendSwitch('use-angle', 'gl');
+else if (renderer === 'vulkan') app.commandLine.appendSwitch('use-angle', 'vulkan');
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -111,6 +138,12 @@ const sendToWindow = (channel, payload) => {
 };
 const hotkeys = new Hotkeys((action, phase) => sendToWindow('hotkey', { action, phase }));
 const updater = new Updater((state) => sendToWindow('update', state));
+const portMapper = new PortMapper((state) => sendToWindow('upnp', state));
+const appAudio = new AppAudioCapture();
+const downloads = new Downloads(() => path.join(app.getPath('downloads'), 'DuoStream'));
+const uploads = new Uploads();
+const tray = new AppTray({ icon: path.join(RENDERER_ROOT, 'img', 'icon-256.png'), onQuit: () => app.quit() });
+const overlay = new Overlay({ preload: path.join(__dirname, '..', 'preload', 'preload.js'), url: `${APP_ORIGIN}/overlay.html` });
 
 function registerAppProtocol() {
   protocol.handle('app', async (request) => {
@@ -184,6 +217,19 @@ async function gpuSummary() {
   }
 }
 
+/**
+ * Запущено ли с правами администратора (высокий уровень целостности, SID S-1-16-12288). Тогда Windows (UIPI)
+ * не даёт перетаскивать файлы из обычного Проводника — у пользователя «не работает drag-n-drop».
+ */
+let isElevated = false;
+function checkElevated() {
+  return new Promise((resolve) => {
+    require('node:child_process').execFile('whoami', ['/groups'], { windowsHide: true, timeout: 5000 }, (err, stdout) =>
+      resolve(!err && String(stdout).includes('S-1-16-12288')),
+    );
+  });
+}
+
 function registerIpc() {
   ipcMain.handle('config:get', (event) => {
     if (!isTrustedSender(event)) throw new Error('forbidden');
@@ -197,6 +243,118 @@ function registerIpc() {
     hotkeys.update(current.config.hotkeys);
     updater.configure(current.config.app.autoUpdate);
     return current.config;
+  });
+
+  // Журнал: строки от интерфейса и показ файла в проводнике
+  ipcMain.on('log:write', (event, level, text) => {
+    if (!isTrustedSender(event)) return;
+    log.write(['info', 'warn', 'error'].includes(level) ? level : 'info', 'ui', String(text).slice(0, 20_000));
+  });
+
+  // Картинка кадра-выброса у зрителя (js/glitch.js) — рядом с файлом журнала
+  let glitchImages = 0;
+  ipcMain.handle('log:image', (event, dataUrl) => {
+    if (!isTrustedSender(event) || !log.file || glitchImages >= 50) return null;
+    const m = /^data:image\/png;base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl));
+    if (!m) return null;
+    const file = log.imagePath(++glitchImages);
+    fs.writeFileSync(file, Buffer.from(m[1], 'base64'));
+    return path.basename(file);
+  });
+
+  // «Отметить глюк»: последние кадры видео (src/renderer/js/frame-recorder.js) — в папку рядом с журналом
+  let markedGlitches = 0;
+  ipcMain.handle('log:frames', async (event, label, frames) => {
+    if (!isTrustedSender(event) || !log.dir || markedGlitches >= 20 || !Array.isArray(frames)) return null;
+    const dir = log.framesDir(String(label).replace(/[^\w-]/g, '').slice(0, 20) || 'frames');
+    await fs.promises.mkdir(dir, { recursive: true });
+    markedGlitches++;
+    let saved = 0;
+    for (const f of frames.slice(0, 200)) {
+      if (!/^\d{3}_-\d{4,5}ms\.jpg$/.test(String(f?.name)) || !(f.data instanceof ArrayBuffer || ArrayBuffer.isView(f.data))) continue;
+      await fs.promises.writeFile(path.join(dir, f.name), Buffer.from(f.data));
+      saved++;
+    }
+    return { dir: path.basename(dir), saved };
+  });
+
+  ipcMain.handle('log:reveal', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    const file = log.ensureFile();
+    if (file) shell.showItemInFolder(file);
+    return file;
+  });
+
+  // Оверлей поверх игры (src/main/overlay.js): состояние приходит из главного окна ~10 раз в секунду
+  ipcMain.on('overlay:update', (event, state) => {
+    if (!isTrustedSender(event) || event.sender !== mainWindow?.webContents) return;
+    overlay.update(state && typeof state === 'object' ? state : {});
+  });
+
+  // Приём файлов из чата (src/main/downloads.js)
+  ipcMain.handle('file:create', (event, name) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return downloads.create(name);
+  });
+  ipcMain.handle('file:write', (event, id, offset, data) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return downloads.write(Number(id), Number(offset), data);
+  });
+  ipcMain.handle('file:close', (event, id) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return downloads.close(Number(id));
+  });
+  ipcMain.handle('file:abort', (event, id) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return downloads.abort(Number(id));
+  });
+  // Отправка файлов из чата: чтение кусками (src/main/downloads.js, Uploads)
+  ipcMain.handle('upload:open', (event, file) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return uploads.open(file);
+  });
+  ipcMain.handle('upload:read', (event, id, offset, length) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return uploads.read(Number(id), Number(offset), Number(length));
+  });
+  ipcMain.handle('upload:close', (event, id) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return uploads.close(Number(id));
+  });
+  ipcMain.handle('file:reveal', (event, file) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    // Показываем только файлы из папки загрузок DuoStream
+    const dir = path.join(app.getPath('downloads'), 'DuoStream');
+    const target = path.resolve(String(file ?? ''));
+    if (target.startsWith(dir + path.sep)) shell.showItemInFolder(target);
+  });
+
+  // Звук только приложения транслируемого окна (src/main/app-audio.js)
+  ipcMain.handle('app-audio:start', async (event, sourceId) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    if (!mainWindow) return { ok: false, error: 'нет окна' };
+    try {
+      return { ok: true, ...(await appAudio.start({ sourceId: String(sourceId ?? ''), webContents: mainWindow.webContents })) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('app-audio:stop', (event, session) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    appAudio.stop(Number.isInteger(session) ? session : undefined);
+  });
+
+  // Проброс портов на роутере через UPnP, пока стример подключён
+  ipcMain.handle('upnp:open', (event, request) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    const ports = (list) => (Array.isArray(list) ? list.map(Number).filter((p) => Number.isInteger(p) && p > 0 && p < 65536).slice(0, 64) : []);
+    return portMapper.open({ tcp: ports(request?.tcp), udp: ports(request?.udp) });
+  });
+
+  ipcMain.handle('upnp:close', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return portMapper.close();
   });
 
   ipcMain.handle('update:status', (event) => {
@@ -334,6 +492,8 @@ function registerIpc() {
       nativeCapture: nativeCapture.status(),
       hotkeys: hotkeys.status(),
       update: updater.status(),
+      overlayVisible: overlay.visible,
+      elevated: isElevated,
       profile: profile ?? null,
     };
   });
@@ -349,6 +509,8 @@ function createWindow() {
     title: profile ? `DuoStream (${profile})` : 'DuoStream',
     backgroundColor: '#0d0f13',
     autoHideMenuBar: true,
+    // В собранном exe иконка и так вшита; при запуске из исходников без этого была бы иконка Electron
+    icon: path.join(RENDERER_ROOT, 'img', 'icon-256.png'),
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.js'),
       contextIsolation: true,
@@ -362,7 +524,13 @@ function createWindow() {
 
   applyNetworkPolicy(mainWindow.webContents);
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+    // Статус GPU-функций честный только после запуска GPU-процесса: сразу после старта всё «disabled_software»
+    setTimeout(() => log.info('main', 'GPU-функции', app.getGPUFeatureStatus()), 3000);
+  });
+  overlay.attachMainWindow(mainWindow);
+  tray.attach(mainWindow);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   mainWindow.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(`${APP_ORIGIN}/`)) event.preventDefault();
@@ -374,26 +542,60 @@ function createWindow() {
   });
   mainWindow.on('closed', () => {
     nativeCapture.stop();
+    appAudio.stop();
     mainWindow = null;
   });
   // Перезагрузка страницы (F5 в DevTools) — старый захват больше некому принимать
   mainWindow.webContents.on('did-start-navigation', (details) => {
-    if (details.isMainFrame && !details.isSameDocument) nativeCapture.stop();
+    if (details.isMainFrame && !details.isSameDocument) {
+      nativeCapture.stop();
+      appAudio.stop();
+    }
   });
 
   mainWindow.loadURL(`${APP_ORIGIN}/index.html`);
 }
 
+/** Настройки для журнала: без паролей */
+function configForLog(cfg) {
+  const copy = structuredClone(cfg);
+  copy.signaling.password = copy.signaling.password ? '***' : '';
+  copy.network.turn.credential = copy.network.turn.credential ? '***' : '';
+  return copy;
+}
+
 app.whenReady().then(() => {
   if (!singleInstance) return;
+  log.open(path.join(app.getPath('userData'), 'logs'));
+  log.captureConsole();
   configPath = resolveConfigPath();
   current = loadConfig(configPath, CONFIG_TEMPLATE);
   if (current.error) console.error(current.error);
+  log.info(
+    'main',
+    `DuoStream ${app.getVersion()} (${app.isPackaged ? 'сборка' : 'исходники'}${profile ? `, профиль ${profile}` : ''}), ` +
+      `Electron ${process.versions.electron}, Chromium ${process.versions.chrome}, Windows ${os.release()}`,
+  );
+  log.info('main', 'настройки', configForLog(current.config));
+  gpuSummary().then((gpu) => log.info('main', 'видеокарты', gpu));
+  // Чем именно выводится видео (по этому видно, в какой сборке зритель и что включено)
+  log.info('main', 'запуск', {
+    exeBuilt: fs.statSync(process.execPath).mtime.toISOString(),
+    renderer,
+    switches: process.argv.slice(1).concat(
+      ['disable-direct-composition', 'disable-accelerated-video-decode'].filter((sw) => app.commandLine.hasSwitch(sw)).map((sw) => `--${sw}`),
+    ),
+  });
+  checkElevated().then((elevated) => {
+    isElevated = elevated;
+    if (elevated) log.warn('main', 'запущено от имени администратора: перетаскивание файлов из Проводника не работает (UIPI)');
+  });
 
   Menu.setApplicationMenu(null);
   registerAppProtocol();
   setupPermissions();
   registerIpc();
+  tray.create();
   createWindow();
   try {
     hotkeys.update(current.config.hotkeys);
@@ -404,9 +606,35 @@ app.whenReady().then(() => {
   mainWindow.webContents.once('did-finish-load', () => updater.configure(current.config.app.autoUpdate));
 });
 
+// Сбои — в журнал; необработанное исключение главного процесса ещё и показываем в окне вместо падения
+process.on('uncaughtException', (err) => {
+  log.error('main', 'необработанное исключение:', err?.stack ?? err);
+  sendToWindow('main-error', String(err?.message ?? err));
+});
+process.on('unhandledRejection', (reason) => log.error('main', 'необработанный отказ промиса:', reason?.stack ?? reason));
+app.on('child-process-gone', (_event, details) => log.warn('main', 'процесс Chromium завершился:', details));
+app.on('render-process-gone', (_event, _wc, details) => log.error('main', 'процесс окна упал:', details));
+
 app.on('window-all-closed', () => app.quit());
-app.on('before-quit', () => {
+let portsClosed = false;
+app.on('before-quit', (event) => {
+  tray.quitting = true; // дальше крестик окна закрывает его, а не прячет в трей
   hotkeys.stop();
   nativeCapture.stop();
+  appAudio.stop();
   embeddedServer.stop();
+  downloads.closeAll(); // недокачанные файлы удаляем
+  uploads.closeAll();
+  // Порты на роутере закрываем до выхода (не дольше 3 с); если не успели — их закроет истечение аренды
+  if (!portsClosed && portMapper.mappings.length) {
+    event.preventDefault();
+    portsClosed = true;
+    Promise.race([portMapper.close(), new Promise((resolve) => setTimeout(resolve, 3000))]).finally(() => app.quit());
+    return;
+  }
+  log.info('main', 'выход');
+});
+app.on('quit', () => {
+  tray.destroy();
+  log.close();
 });

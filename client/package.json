@@ -1,7 +1,7 @@
 {
   "name": "duostream",
   "productName": "DuoStream",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "P2P-стрим экрана и голосовой чат на двоих: WebRTC, AV1/NVENC, шумодав на ONNX Runtime",
   "main": "src/main/main.js",
@@ -59,6 +59,7 @@
       }
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -78,6 +79,8 @@
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "DuoStream",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
       "runAfterFinish": true,
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },

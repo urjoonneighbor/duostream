@@ -16,6 +16,11 @@ const ICONS = {
   sliders:
     '<path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/>',
   fullscreen: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+  chat: '<path d="M4 5h16v11H9l-5 4z"/>',
+  clip: '<path d="M20 12l-8 8a5 5 0 0 1-7-7l9-9a3.5 3.5 0 0 1 5 5l-9 9a2 2 0 0 1-3-3l8-8"/>',
+  send: '<path d="M4 12l16-8-6 16-3-7z"/>',
+  close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  flag: '<path d="M5 21V4M5 4h11l-2 4 2 4H5"/>',
 };
 
 export function iconSvg(name) {

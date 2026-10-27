@@ -26,6 +26,9 @@ const DEFAULTS = Object.freeze({
     degradationPreference: 'maintain-framerate',
     showPreview: true,
     captureEngine: 'auto',
+    // Вывод видео у зрителя (main.js, до app.ready): d3d11 — по умолчанию; opengl, vulkan — другой путь
+    // ANGLE через видеокарту; software — без видеокарты. У стримера всегда d3d11 (захват и кодирование)
+    renderer: 'd3d11',
   },
   audio: {
     micDeviceId: 'default',
@@ -41,6 +44,7 @@ const DEFAULTS = Object.freeze({
     systemAudioBitrateKbps: 160,
     pushToTalk: false,
     pushToTalkReleaseMs: 150,
+    uiSounds: true, // звуки событий: собеседник подключился/отключился, трансляция началась/закончилась
   },
   // Глобальные горячие клавиши (src/main/hotkeys.js); null — не назначено. Коды — uiohook.
   hotkeys: {
@@ -49,6 +53,8 @@ const DEFAULTS = Object.freeze({
     pushToTalk: null,
     toggleDenoise: null,
     toggleStream: null,
+    // «Отметить глюк»: сохранить последние ~2 с кадров у обоих (src/renderer/js/frame-recorder.js)
+    markGlitch: { key: 34, ctrl: true, shift: true, alt: false, meta: false, label: 'Ctrl + Shift + G' },
   },
   network: {
     iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }],
@@ -56,12 +62,14 @@ const DEFAULTS = Object.freeze({
     udpPortRange: { min: 50000, max: 50019 },
     publicIp: '',
     forceRelay: false,
+    upnp: true, // стример: открывать порты на роутере автоматически (src/main/upnp.js)
   },
   playback: {
     jitterBufferTargetMs: 0,
   },
   app: {
     autoUpdate: true, // проверять обновления на GitHub (src/main/updater.js)
+    overlay: { enabled: true, corner: 'top-left' }, // оверлей поверх игры (src/main/overlay.js)
   },
 });
 
@@ -159,6 +167,14 @@ function sanitize(input) {
   v.showPreview = bool(v.showPreview, d.video.showPreview);
   // auto — собственный захват (до 120 FPS), при сбое Chromium; chromium — только getDisplayMedia
   v.captureEngine = oneOf(v.captureEngine, ['auto', 'chromium'], d.video.captureEngine);
+  // Прежняя галочка «Аппаратное декодирование» убрана: декодер не был причиной глюков, а видео на процессоре
+  // декодируется и так при выводе через OpenGL, Vulkan и без видеокарты (renderer)
+  delete v.hardwareDecode;
+  // Прежняя галочка «Отрисовка без видеокарты» (video.softwareRendering) — это renderer: 'software'
+  const src = isPlainObject(input) && isPlainObject(input.video) ? input.video : {};
+  if (src.softwareRendering === true && src.renderer === undefined) v.renderer = 'software';
+  delete v.softwareRendering;
+  v.renderer = oneOf(v.renderer, ['d3d11', 'opengl', 'vulkan', 'software'], d.video.renderer);
 
   const a = c.audio;
   a.micDeviceId = str(a.micDeviceId, 'default') || 'default';
@@ -175,6 +191,7 @@ function sanitize(input) {
   // Режим рации: микрофон передаётся, только пока зажата клавиша hotkeys.pushToTalk
   a.pushToTalk = bool(a.pushToTalk, d.audio.pushToTalk);
   a.pushToTalkReleaseMs = clampInt(a.pushToTalkReleaseMs, 0, 2000, d.audio.pushToTalkReleaseMs);
+  a.uiSounds = bool(a.uiSounds, d.audio.uiSounds);
 
   const n = c.network;
   n.iceServers = sanitizeIceServers(n.iceServers);
@@ -190,9 +207,14 @@ function sanitize(input) {
   n.udpPortRange = { min, max };
   n.publicIp = str(n.publicIp);
   n.forceRelay = bool(n.forceRelay, false);
+  n.upnp = bool(n.upnp, d.network.upnp);
 
   c.playback.jitterBufferTargetMs = clampInt(c.playback.jitterBufferTargetMs, 0, 4000, 0);
   c.app.autoUpdate = bool(c.app.autoUpdate, d.app.autoUpdate);
+  c.app.overlay = {
+    enabled: bool(c.app.overlay.enabled, d.app.overlay.enabled),
+    corner: oneOf(c.app.overlay.corner, ['top-left', 'top-right', 'bottom-left', 'bottom-right'], d.app.overlay.corner),
+  };
   return c;
 }
 

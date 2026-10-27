@@ -24,6 +24,7 @@ export const HOTKEY_ACTIONS = [
   ['pushToTalk', 'Рация — говорить, пока клавиша зажата'],
   ['toggleDenoise', 'Шумодав вкл/выкл'],
   ['toggleStream', 'Начать / остановить трансляцию (стример)'],
+  ['markGlitch', 'Отметить глюк картинки — сохранить последние 2 с кадров у обоих'],
 ];
 
 const sameBinding = (a, b) =>
@@ -73,6 +74,7 @@ export class SettingsDialog {
     this.dialog.addEventListener('cancel', (event) => {
       if (this.recordingAction) event.preventDefault();
     });
+    $('#btnRevealLog').addEventListener('click', () => window.duo.revealLog());
     $('#btnOpenConfig').addEventListener('click', async () => {
       const error = await window.duo.openConfigFile();
       if (error) toast(`Не удалось открыть файл: ${error}`, 'error');
@@ -110,6 +112,7 @@ export class SettingsDialog {
     setSelect($('#sCaptureEngine'), v.captureEngine);
     $('#sPreferHw').checked = v.preferHardware;
     $('#sPreview').checked = v.showPreview;
+    setSelect($('#sRenderer'), v.renderer);
 
     $('#sDenoise').checked = a.noiseSuppression;
     setSelect($('#sDenoiseModel'), a.denoiseModel);
@@ -122,6 +125,7 @@ export class SettingsDialog {
     $('#sSystemBitrate').value = a.systemAudioBitrateKbps;
     $('#sSystemAudio').checked = a.captureSystemAudio;
     $('#sPushToTalk').checked = a.pushToTalk;
+    $('#sUiSounds').checked = a.uiSounds;
     $('#sPttRelease').value = a.pushToTalkReleaseMs;
     this.recordingAction = null;
     this.renderHotkeys();
@@ -133,6 +137,7 @@ export class SettingsDialog {
     $('#sPortMin').value = n.udpPortRange.min;
     $('#sPortMax').value = n.udpPortRange.max;
     $('#sPublicIp').value = n.publicIp;
+    $('#sUpnp').checked = n.upnp;
     $('#sTurnEnabled').checked = n.turn.enabled;
     $('#sTurnUrl').value = n.turn.urls;
     $('#sTurnUser').value = n.turn.username;
@@ -140,6 +145,8 @@ export class SettingsDialog {
     $('#sForceRelay').checked = n.forceRelay;
     $('#sJitter').value = p.jitterBufferTargetMs;
     $('#sAutoUpdate').checked = this.cfg.app.autoUpdate;
+    $('#sOverlay').checked = this.cfg.app.overlay.enabled;
+    setSelect($('#sOverlayCorner'), this.cfg.app.overlay.corner);
 
     $('#configPath').textContent = configPath;
     $('#configPath').title = configPath;
@@ -275,6 +282,7 @@ export class SettingsDialog {
       captureEngine: $('#sCaptureEngine').value,
       preferHardware: $('#sPreferHw').checked,
       showPreview: $('#sPreview').checked,
+      renderer: $('#sRenderer').value,
     });
     Object.assign(cfg.audio, {
       micDeviceId: $('#sMic').value || 'default',
@@ -289,6 +297,7 @@ export class SettingsDialog {
       systemAudioBitrateKbps: num('#sSystemBitrate'),
       captureSystemAudio: $('#sSystemAudio').checked,
       pushToTalk: $('#sPushToTalk').checked,
+      uiSounds: $('#sUiSounds').checked,
       pushToTalkReleaseMs: num('#sPttRelease'),
     });
     const stun = $('#sStun')
@@ -298,6 +307,7 @@ export class SettingsDialog {
     cfg.network.iceServers = [...(stun.length ? [{ urls: stun }] : []), ...this.cfg.network.iceServers.filter((s) => s.username)];
     cfg.network.udpPortRange = { min: num('#sPortMin'), max: num('#sPortMax') };
     cfg.network.publicIp = $('#sPublicIp').value.trim();
+    cfg.network.upnp = $('#sUpnp').checked;
     cfg.signaling.allowedIps = this.allowedIpsInput();
     cfg.network.turn = {
       enabled: $('#sTurnEnabled').checked,
@@ -308,6 +318,7 @@ export class SettingsDialog {
     cfg.network.forceRelay = $('#sForceRelay').checked;
     cfg.playback.jitterBufferTargetMs = num('#sJitter');
     cfg.app.autoUpdate = $('#sAutoUpdate').checked;
+    cfg.app.overlay = { enabled: $('#sOverlay').checked, corner: $('#sOverlayCorner').value };
     return cfg;
   }
 }
