@@ -1,6 +1,4 @@
 <p align="center"><img src="client/src/renderer/img/icon.svg" width="96" alt="DuoStream"></p>
-<h1 align="center">DuoStream</h1>
-<p align="center">Приватный P2P-стрим и голосовой чат на двоих</p>
 
 # DuoStream — приватный P2P-стрим и голосовой чат на двоих
 
