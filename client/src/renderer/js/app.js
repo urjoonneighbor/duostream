@@ -7,9 +7,42 @@ import { probeVideoCodecs, orderCodecs } from './codecs.js';
 import { StatsMonitor, describeStats, describeIce, formatKbps, formatPath } from './stats.js';
 import { openSourcePicker } from './picker.js';
 import { NativeCaptureTrack, nativeCaptureStatus } from './native-capture.js';
+import { AppAudioTrack } from './app-audio.js';
+import { GlitchDetector } from './glitch.js';
+import { FrameRecorder } from './frame-recorder.js';
+import { Playback, SendGain } from './playback.js';
+import { Chat } from './chat.js';
+import { ChatPanel } from './chat-ui.js';
 import { SettingsDialog } from './settings.js';
 import { $, toast, renderIcons, setIcon, renderList } from './ui.js';
 import { playCue } from './tones.js';
+
+// Всё, что интерфейс пишет в консоль (в том числе каждое уведомление), — ещё и в журнал сеанса
+// (src/main/logger.js): по нему разбираются проблемы, которые сложно поймать вживую
+const formatLogArg = (a) => {
+  if (typeof a === 'string') return a;
+  if (a instanceof Error) return a.stack ?? a.message;
+  try {
+    return JSON.stringify(a);
+  } catch {
+    return String(a);
+  }
+};
+for (const [method, level] of [
+  ['log', 'info'],
+  ['info', 'info'],
+  ['warn', 'warn'],
+  ['error', 'error'],
+]) {
+  const original = console[method].bind(console);
+  console[method] = (...args) => {
+    original(...args);
+    window.duo.log(level, args.map(formatLogArg).join(' '));
+  };
+}
+window.addEventListener('error', (e) => console.error('[ui] ошибка:', e.error ?? e.message));
+window.addEventListener('unhandledrejection', (e) => console.error('[ui] необработанный отказ:', e.reason));
+const STATS_LOG_MS = 60_000; // сводка статистики в журнал раз в минуту (и сразу при важных изменениях)
 
 const ROLE_NAME = { streamer: 'Стример', viewer: 'Зритель' };
 const FATAL_CODES = new Set(['auth-failed', 'banned', 'replaced', 'bad-version', 'bad-role']);
@@ -34,7 +67,8 @@ const state = {
   screen: null, // MediaStream захвата экрана (стример)
   capture: null, // {engine:'native'|'chromium', native, width, height, scale}
   hostedServer: null, // встроенный сигнальный сервер стримера: {port, own}
-  share: null, // стример: {address} — что передать зрителю
+  share: null, // стример: {address, port, fromRouter} — что передать зрителю
+  upnp: null, // стример: проброс портов на роутере через UPnP (src/main/upnp.js)
   publicIp: null, // белый IP стримера (настройка, HTTPS или STUN)
   lastPick: null, // последний выбранный источник — для отката на захват Chromium
   nativeStatus: null, // доступен ли собственный захват (src/main/native-capture.js)
@@ -53,6 +87,12 @@ const state = {
   pttHeld: false, // режим рации: клавиша зажата
   pttTimer: 0,
   updateShown: null, // версия, о которой уже показали уведомление
+  statsLogged: null, // что было в последней сводке журнала (logStatsIfNeeded)
+  statsLoggedAt: 0,
+  chat: new Chat(), // чат и файлы (js/chat.js) — переживает пересоздание WebRTC-сессии
+  glitches: null, // зритель: детектор кадров-выбросов (js/glitch.js)
+  recorder: new FrameRecorder(), // последние кадры видео для «Отметить глюк» (js/frame-recorder.js)
+  glitchMarking: false,
   outputs: new Map(), // deviceId → название устройства вывода звука
   voicePeakDb: -Infinity, // максимум уровня голоса собеседника с прошлого тика статистики
   voiceDb: -Infinity, // то же за последнюю завершённую секунду (для окна статистики)
@@ -62,6 +102,7 @@ const state = {
 globalThis.duoDebug = state;
 
 let settingsDialog;
+let chatPanel;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ======================= подключение =======================
@@ -174,14 +215,63 @@ async function startHostedServer(port, password) {
 
 /** Стример: адрес, который нужно передать зрителю, и белый IP для кандидатов проброшенного порта. */
 function prepareShareAddress(port) {
-  state.share = { address: `ws://<ваш белый IP>:${port}` };
+  state.share = { address: `ws://<ваш белый IP>:${port}`, port };
   detectPublicIp(state.cfg.network).then((ip) => {
-    if (!ip || !state.share) return;
-    state.publicIp = ip;
-    state.share.address = `ws://${ip}:${port}`;
-    if (state.role === 'streamer') state.session?.addPublicIp(ip);
-    render();
+    // Адрес, который сообщил сам роутер (UPnP), точнее — его не перебиваем
+    if (ip && !state.share?.fromRouter) applyPublicIp(ip);
   });
+}
+
+function applyPublicIp(ip, { fromRouter = false } = {}) {
+  if (!state.share) return;
+  state.publicIp = ip;
+  state.share.address = `ws://${ip}:${state.share.port}`;
+  if (fromRouter) state.share.fromRouter = true;
+  if (state.role === 'streamer') state.session?.addPublicIp(ip);
+  render();
+}
+
+/**
+ * Стример: просим роутер открыть порт сервера и UDP-диапазон WebRTC (UPnP) — без ручного проброса.
+ * Не ждём: подключение к серверу идёт параллельно, результат появится под адресом для зрителя.
+ */
+function openRouterPorts(serverPort) {
+  const n = state.cfg.network;
+  if (!n.upnp) return;
+  const { min, max } = n.udpPortRange;
+  const udp = min ? Array.from({ length: max - min + 1 }, (_, i) => min + i) : [];
+  state.upnp = { status: 'working' };
+  render();
+  window.duo.upnp
+    .open(serverPort ? [serverPort] : [], udp)
+    .catch((err) => ({ status: 'unavailable', message: err.message }))
+    .then((result) => {
+      if (!state.signaling || state.role !== 'streamer') return;
+      state.upnp = result;
+      if (result.cgnat) {
+        toast(
+          `У роутера нет белого IP: провайдер выдал ему серый адрес ${result.externalIp}. Зритель не сможет ` +
+            'подключиться — нужен белый IP у провайдера (docs/03-static-ip.md).',
+          'error',
+          15000,
+        );
+      } else if (result.externalIp && !n.publicIp) {
+        applyPublicIp(result.externalIp, { fromRouter: true });
+      }
+      render();
+    });
+}
+
+function upnpNote() {
+  const u = state.upnp;
+  if (!u) return '';
+  if (u.status === 'working') return 'Открываю порты на роутере (UPnP)…';
+  if (u.status === 'unavailable') {
+    return 'Роутер не открыл порты сам (UPnP выключен или не поддерживается). Если порты уже проброшены вручную — всё в порядке, иначе включите UPnP в настройках роутера.';
+  }
+  const manual = u.manual ? `, ${u.manual} уже были проброшены вручную` : '';
+  if (u.status === 'partial') return `Часть портов роутер не открыл: ${u.message}`;
+  return `Порты открыты на роутере автоматически (UPnP${u.router ? `, ${u.router}` : ''}${manual}) — до отключения.`;
 }
 
 async function connect(event) {
@@ -197,6 +287,7 @@ async function connect(event) {
   if (password.length < 8) return updateConnectHint('Пароль — не короче 8 символов, одинаковый у стримера и зрителя', true);
 
   $('#btnConnect').disabled = true;
+  console.log(`[connect] ${role}, сервер ${hostServer ? `встроенный, порт ${port}` : url}`);
   try {
     const signalingCfg = { ...state.cfg.signaling, password, role, displayName: name, hostServer, serverPort: port || state.cfg.signaling.serverPort };
     if (!hostServer) signalingCfg.url = url;
@@ -204,6 +295,7 @@ async function connect(event) {
     state.role = role;
     if (hostServer) await startHostedServer(port, password);
     if (role === 'streamer') prepareShareAddress(hostServer ? port : Number(new URL(url).port) || 80);
+    if (role === 'streamer') openRouterPorts(hostServer ? port : null);
     await ensureMic();
     if (role === 'streamer') await ensureCodecProbe();
 
@@ -212,13 +304,18 @@ async function connect(event) {
     signaling.onSignal = handleSignal;
     signaling.addEventListener('state', onSignalingState);
     signaling.addEventListener('welcome', (e) => {
+      const was = state.peer;
       state.peer = e.detail.peer;
-      if (state.peer) onPeerPresent();
+      if (state.peer) {
+        if (!was) uiCue('join');
+        onPeerPresent();
+      }
       render();
     });
     signaling.addEventListener('peer-joined', (e) => {
       state.peer = e.detail.peer;
       toast(`${e.detail.peer.name} подключился`, 'ok');
+      uiCue('join');
       onPeerPresent();
       render();
     });
@@ -252,13 +349,17 @@ function onServerError({ code, message }) {
 }
 
 function onPeerPresent() {
+  state.presenceSent = null; // собеседник (пере)подключился — сообщаем ему своё состояние заново
+  sendPresence();
   if (state.role !== 'streamer') return; // зритель ждёт offer
   startStreamerSession().catch((err) => toast(`Ошибка WebRTC: ${err.message}`, 'error'));
 }
 
 function onPeerLeft() {
   toast(`${state.peer?.name ?? 'Собеседник'} отключился`, 'warn');
+  uiCue('leave');
   state.peer = null;
+  state.peerPresence = null;
   closeSession();
   render();
 }
@@ -277,13 +378,20 @@ function teardown() {
   const signaling = state.signaling;
   state.signaling = null;
   state.peer = null;
+  state.peerPresence = null;
   signaling?.close();
   // Встроенный сервер живёт, пока стример подключён
   if (state.hostedServer?.own) window.duo.server.stop();
   state.hostedServer = null;
   state.share = null;
+  if (state.upnp) window.duo.upnp.close(); // порты на роутере больше не нужны
+  state.upnp = null;
   state.mic?.stop();
   state.mic = null;
+  state.glitches?.stop();
+  state.glitches = null;
+  state.chat.interrupt();
+  console.log('[connect] отключено');
   render();
 }
 
@@ -306,6 +414,7 @@ function createSession(role, sid) {
     publicIp: role === 'streamer' ? state.publicIp : null,
   });
   session.addEventListener('track', onRemoteTrack);
+  session.addEventListener('datachannels', () => state.chat.attach(session));
   session.addEventListener('state', (e) => onPeerState(session, e.detail.state));
   session.addEventListener('gave-up', () =>
     toast('Не удалось восстановить P2P-соединение. Проверьте сеть и проброс портов, затем переподключитесь.', 'error', 10000),
@@ -314,6 +423,7 @@ function createSession(role, sid) {
     console.log(`[ice] кандидат через проброшенный порт: ${e.detail.ip}:${e.detail.port}`),
   );
   state.session = session;
+  console.log(`[session] новая WebRTC-сессия (${role}, ${session.sid})`);
   state.monitor = new StatsMonitor(session);
   state.stats = null;
   state.swStrikes = 0;
@@ -337,19 +447,34 @@ function closeSession({ bye = false } = {}) {
   const session = state.session;
   if (!session) return Promise.resolve();
   const sent = bye ? session.send({ kind: 'bye' }) : Promise.resolve();
+  console.log(`[session] сессия ${session.sid} закрыта`);
+  if (state.chat.session === session) state.chat.detach(); // передачи файлов продолжатся в следующей сессии
   session.close();
   state.session = null;
   state.monitor = null;
   state.stats = null;
   state.remoteVideo = null;
+  if (state.role !== 'streamer') state.recorder.attach(null);
   state.remote = { live: false, info: null };
-  $('#voiceAudio').srcObject = null;
-  $('#systemAudio').srcObject = null;
+  state.playback.voice.detach();
+  state.playback.system.detach();
   render();
   return sent;
 }
 
 async function handleSignal(msg) {
+  if (msg.kind === 'glitch-mark') {
+    markGlitch(false);
+    return;
+  }
+  if (msg.kind === 'presence') {
+    // Микрофон и звук собеседника — не зависят от WebRTC-сессии
+    const mic = ['on', 'off', 'ptt', 'none'].includes(msg.mic) ? msg.mic : 'on';
+    state.peerPresence = { mic, deafened: Boolean(msg.deafened) };
+    console.log(`[peer] микрофон ${mic}, звук ${msg.deafened ? 'выключен' : 'включён'}`);
+    render();
+    return;
+  }
   try {
     if (msg.kind === 'offer') {
       if (state.role !== 'viewer') return;
@@ -376,8 +501,14 @@ async function handleSignal(msg) {
       case 'stream-state': {
         const wasLive = state.remote.live;
         state.remote = { live: Boolean(msg.live), info: msg };
-        if (msg.live && !wasLive) toast(`Трансляция началась: ${msg.source || 'экран'}`, 'ok');
-        if (!msg.live && wasLive) toast('Стример остановил трансляцию', 'warn');
+        if (msg.live && !wasLive) {
+          toast(`Трансляция началась: ${msg.source || 'экран'}`, 'ok');
+          uiCue('streamStart');
+        }
+        if (!msg.live && wasLive) {
+          toast('Стример остановил трансляцию', 'warn');
+          uiCue('streamEnd');
+        }
         break;
       }
       case 'bye':
@@ -396,6 +527,7 @@ async function handleSignal(msg) {
 
 function onPeerState(session, pcState) {
   if (session !== state.session) return;
+  console.log(`[session] P2P: ${pcState}`);
   if (pcState === 'connected' && !state.pathAnnounced) {
     state.pathAnnounced = true;
     setTimeout(async () => {
@@ -411,23 +543,73 @@ function onRemoteTrack({ detail }) {
   const { kind, stream, track } = detail;
   if (kind === 'video') {
     state.remoteVideo = stream;
+    state.recorder.attach(track);
     track.addEventListener('unmute', render);
+    if (!state.glitches) {
+      state.glitches = new GlitchDetector($('#video'), onGlitch);
+      state.glitches.start();
+    }
   } else {
-    attachAudio(kind === 'system' ? $('#systemAudio') : $('#voiceAudio'), stream);
+    const playback = kind === 'system' ? state.playback.system : state.playback.voice;
+    playback.attach(stream);
+    applySink(playback);
   }
   render();
 }
 
-async function attachAudio(audio, stream) {
-  audio.srcObject = stream;
-  await applySink(audio);
-  audio.play().catch(() => {});
+/**
+ * «Отметить глюк»: последние ~2 с кадров видео — у зрителя декодированных, у стримера захваченных — в папку
+ * рядом с журналом. Нажал один — сохраняют оба (сигнал собеседнику), по кадрам видно, где рождается глюк.
+ * @param {boolean} local отметили здесь (а не собеседник)
+ */
+async function markGlitch(local) {
+  if (local && state.peer) state.signaling?.sendSignal({ kind: 'glitch-mark' });
+  if (state.glitchMarking) return;
+  const who = local ? 'вы' : state.peer?.name ?? 'собеседник';
+  if (!state.recorder.frames.length) {
+    console.warn(`[glitch] отметка (${who}): кадров нет — видео не идёт`);
+    if (local) toast('Отметка глюка: видео сейчас не идёт — сохранять нечего', 'warn');
+    return;
+  }
+  state.glitchMarking = true;
+  try {
+    const frames = await state.recorder.dump();
+    const role = state.role === 'streamer' ? 'streamer' : 'viewer';
+    const res = await window.duo.saveLogFrames(`mark-${role}`, frames);
+    const v = state.stats?.video;
+    const context = v ? ` | видео ${v.codec} ${v.impl} ${v.width}×${v.height} @ ${v.fps} к/с, потери ${state.stats.lossPct?.toFixed(2) ?? '—'}%` : '';
+    console.warn(`[glitch] отметка (${who}): ${res ? `${res.saved} кадров → ${res.dir}` : 'не сохранено (лимит за сеанс)'}${context}`);
+    if (res) {
+      toast(`Глюк отмечен${local ? '' : ` (${who})`}: ${res.saved} последних кадров сохранено рядом с журналом`, 'ok', 6000, {
+        label: 'Показать',
+        onClick: () => window.duo.revealLog(),
+      });
+    }
+  } catch (err) {
+    console.warn(`[glitch] отметка не сохранилась: ${err.message}`);
+  } finally {
+    state.glitchMarking = false;
+  }
 }
 
-async function applySink(audio) {
-  const id = state.cfg.audio.outputDeviceId;
+/** Кадр-выброс у зрителя: в журнал (с картинкой «до — глюк — после» рядом с ним) */
+async function onGlitch(info) {
+  const { image, ...rest } = info;
+  const file = image ? await window.duo.saveLogImage(image).catch(() => null) : null;
+  const v = state.stats?.video;
+  const context = v ? ` | видео ${v.codec} ${v.impl} ${v.width}×${v.height}, потери ${state.stats.lossPct?.toFixed(2) ?? '—'}%` : '';
+  console.warn(`[glitch] кадр-выброс ${JSON.stringify(rest)}${file ? `, картинка ${file}` : ''}${context}`);
+}
+
+function glitchSummary() {
+  const g = state.glitches;
+  return `${g.count} за сеанс (проверено кадров ${g.checked}; картинки — рядом с журналом)`;
+}
+
+/** @param {import('./playback.js').Playback} playback */
+async function applySink(playback) {
   try {
-    await audio.setSinkId(id === 'default' ? '' : id);
+    await playback.setSink(state.cfg.audio.outputDeviceId);
   } catch (err) {
     toast(`Устройство вывода недоступно: ${err.message}`, 'warn');
   }
@@ -462,20 +644,46 @@ async function openCapture(pick, { forceChromium = false } = {}) {
     const native = new NativeCaptureTrack();
     try {
       const stream = await native.start(pick.source.id, { fps: v.frameRate, contentHint: v.contentHint });
-      if (pick.audio) await addSystemAudio(stream, pick.source);
-      return { stream, engine: 'native', native, width: native.width, height: native.height };
+      const capture = { stream, engine: 'native', native, width: native.width, height: native.height };
+      if (pick.audio) await addStreamAudio(capture, pick.source);
+      return capture;
     } catch (err) {
       native.stop();
       toast(`Собственный захват не запустился (${err.message}). Использую захват Chromium — до ~60 FPS.`, 'warn', 9000);
     }
   }
-  await window.duo.selectSource(pick.source, pick.audio);
+  // Звук окна берём отдельно (только его приложение), системный — вместе с видео
+  const windowAudio = pick.audio && pick.source.type === 'window';
+  await window.duo.selectSource(pick.source, pick.audio && !windowAudio);
   const stream = await navigator.mediaDevices.getDisplayMedia({
     video: captureConstraints(v),
-    audio: pick.audio ? systemAudioConstraints() : false,
+    audio: pick.audio && !windowAudio ? systemAudioConstraints() : false,
   });
   const s = stream.getVideoTracks()[0].getSettings();
-  return { stream, engine: 'chromium', width: s.width, height: s.height };
+  const capture = { stream, engine: 'chromium', width: s.width, height: s.height, audioSource: pick.audio && !windowAudio ? 'system' : null };
+  if (windowAudio) await addStreamAudio(capture, pick.source);
+  return capture;
+}
+
+/**
+ * Звук трансляции. Окно — звук только его приложения (с дочерними процессами), иначе зритель слышал бы
+ * всё подряд: музыку, другие окна, уведомления. Экран — весь системный звук без звуков DuoStream.
+ * Если звук приложения захватить не вышло (Windows старше 10 2004, нет процесса захвата) — системный.
+ */
+async function addStreamAudio(capture, source) {
+  if (source.type === 'window') {
+    const app = new AppAudioTrack();
+    try {
+      capture.stream.addTrack(await app.start(source.id));
+      Object.assign(capture, { appAudio: app, audioSource: 'app' });
+      return;
+    } catch (err) {
+      app.stop();
+      toast(`Звук окна отдельно не захватить (${err.message}) — передаю весь системный звук`, 'warn', 9000);
+    }
+  }
+  await addSystemAudio(capture.stream, source);
+  if (capture.stream.getAudioTracks().length) capture.audioSource = 'system';
 }
 
 /**
@@ -517,6 +725,8 @@ function captureScale(capture) {
 function stopCapture(stream, capture) {
   stream?.getTracks().forEach((t) => t.stop());
   capture?.native?.stop();
+  capture?.appAudio?.stop();
+  capture?.sendGain?.stop();
 }
 
 /** Запускает (или переключает) трансляцию выбранного источника. */
@@ -530,6 +740,21 @@ async function beginCapture(pick, options) {
   }
   const v = state.cfg.video;
   const stream = capture.stream;
+  const audioTrack = stream.getAudioTracks()[0];
+  const withAudio = !audioTrack
+    ? ''
+    : capture.audioSource === 'app'
+      ? ' · со звуком только этого окна'
+      : audioTrack.getSettings().restrictOwnAudio
+        ? ' · со звуком системы (без звука DuoStream)'
+        : ' · со звуком системы';
+  if (audioTrack) {
+    // Звук трансляции — через регулятор громкости (ползунок «Стрим» у стримера)
+    capture.sendGain = new SendGain(audioTrack);
+    capture.sendGain.setVolume(Number($('#streamSendVolume').value) / 100);
+    stream.removeTrack(audioTrack);
+    stream.addTrack(capture.sendGain.track);
+  }
   const track = stream.getVideoTracks()[0];
   // 'motion' — WebRTC кодирует как видео (держит FPS), а не как «презентацию» с низкой частотой кадров
   track.contentHint = v.contentHint;
@@ -541,26 +766,26 @@ async function beginCapture(pick, options) {
 
   const previous = { stream: state.screen, capture: state.capture };
   Object.assign(state, { screen: stream, capture, sourceName: pick.source.name, lastPick: pick, lastEncoderRestart: 0, nativeStats: null });
+  state.recorder.attach(stream.getVideoTracks()[0] ?? null);
   stopCapture(previous.stream, previous.capture);
 
   const width = Math.round(capture.width / capture.scale);
   const height = Math.round(capture.height / capture.scale);
   if (state.session?.wouldGrowFrame(width * height)) {
-    // Кадр стал больше прежнего — пересоздаём сессию, иначе Chromium уйдёт с NVENC на CPU
-    await startStreamerSession();
+    // Кадр стал больше прежнего — новый энкодер, иначе Chromium уйдёт с NVENC на CPU
+    await state.session.setScreen(stream, { scaleDownBy: capture.scale });
+    await restartVideoEncoder('новый источник больше прежнего');
+    sendStreamState();
   } else if (state.session) {
     await state.session.setScreen(stream, { scaleDownBy: capture.scale });
     sendStreamState();
   }
+  // Энкодер создаётся под первый кадр — запоминаем его размер сразу, не дожидаясь статистики
+  state.session?.noteEncodedFrame(width, height);
 
   const engine = capture.engine === 'native' ? 'собственный захват' : 'захват Chromium';
-  const audioTrack = stream.getAudioTracks()[0];
-  const withAudio = !audioTrack
-    ? ''
-    : audioTrack.getSettings().restrictOwnAudio
-      ? ' · со звуком (без звука DuoStream)'
-      : ' · со звуком';
   toast(`Трансляция: ${pick.source.name} · ${width}×${height} · до ${v.frameRate} FPS · ${engine}${withAudio}`, 'ok');
+  if (!previous.stream) uiCue('streamStart'); // смена источника во время трансляции — без сигнала
   if (capture.engine === 'native') watchNativeFrames(capture);
   render();
   return true;
@@ -588,10 +813,13 @@ function onNativeEvent(e) {
     state.nativeStats = { ...e, write: capture.native.takeWriteStats() };
   } else if (e.type === 'size') {
     // Окно изменило размер
+    console.log(`[capture] размер кадра ${capture.width}×${capture.height} → ${e.width}×${e.height}`);
     Object.assign(capture, { width: e.width, height: e.height });
     capture.scale = captureScale(capture);
     state.session?.setScale(capture.scale);
-    // Энкодер Chromium уходит на CPU при любом росте кадра относительно предыдущего
+    // Chromium перенастраивает аппаратный энкодер под каждый новый размер, а при росте относительно
+    // предыдущего (даже после уменьшения и до прежнего размера) уходит на CPU — замерено. Поэтому любой
+    // рост — повод пересоздать энкодер (без переподключения, см. restartVideoEncoder)
     const area = (capture.width / capture.scale) * (capture.height / capture.scale);
     if (capture.lastArea && area > capture.lastArea) capture.grewSinceEncoderStart = true;
     capture.lastArea = area;
@@ -612,9 +840,33 @@ function scheduleGrowthCheck(capture) {
   state.growthTimer = setTimeout(() => {
     if (state.capture !== capture || !capture.grewSinceEncoderStart || !state.session) return;
     capture.grewSinceEncoderStart = false;
-    state.lastEncoderRestart = Date.now();
-    startStreamerSession().catch((err) => toast(`Ошибка WebRTC: ${err.message}`, 'error'));
+    restartVideoEncoder('окно выросло').catch((err) => toast(`Ошибка WebRTC: ${err.message}`, 'error'));
   }, 800);
+}
+
+/**
+ * Новый аппаратный энкодер под больший кадр. Сначала — без переподключения: видеопоток выключается
+ * и включается, WebRTC создаёт энкодер заново, а соединение, звук и чат не трогаются. Если через 3 с
+ * кодирование всё равно на CPU — пересоздаём всю WebRTC-сессию (зритель на секунду увидит переподключение).
+ */
+async function restartVideoEncoder(reason) {
+  const session = state.session;
+  if (!session || !state.capture) return;
+  state.lastEncoderRestart = Date.now();
+  console.log(`[encoder] пересоздаю видеоэнкодер (${reason}) без переподключения`);
+  await session.resetVideoEncoder();
+  const area = Math.round(state.capture.width / state.capture.scale) * Math.round(state.capture.height / state.capture.scale);
+  session.maxFrameArea = area; // новый энкодер создан под текущий кадр
+  state.capture.lastArea = area;
+  await sleep(3000);
+  if (state.session !== session) return;
+  const stats = await state.monitor?.sample().catch(() => null);
+  const v = stats?.video;
+  console.log(`[encoder] после пересоздания: ${v ? `${v.codec} ${v.impl} ${v.width}×${v.height}` : 'нет статистики'}`);
+  if (v && v.hw === false) {
+    console.log('[encoder] без переподключения не вышло — пересоздаю сессию');
+    await startStreamerSession();
+  }
 }
 
 async function stopStream(reason) {
@@ -622,7 +874,9 @@ async function stopStream(reason) {
   if (!stream) return;
   const capture = state.capture;
   Object.assign(state, { screen: null, capture: null, sourceName: '', nativeStats: null });
+  state.recorder.attach(null);
   stopCapture(stream, capture);
+  uiCue('streamEnd');
   if (state.session) await state.session.setScreen(null);
   sendStreamState();
   if (reason) toast(reason, 'warn');
@@ -691,13 +945,12 @@ function checkEncoder(stats) {
   if (++state.swStrikes < SW_ENCODER_STRIKES) return;
   state.swStrikes = 0;
 
-  // Кодек умеет аппаратно, но энкодер «отвалился» (рост кадра, сбой драйвера) — пересоздаём сессию
-  // с тем же кодеком. Если это уже делали недавно и не помогло — переходим к следующему кодеку.
+  // Кодек умеет аппаратно, но энкодер «отвалился» (рост кадра, сбой драйвера) — пересоздаём энкодер
+  // (сначала без переподключения). Если это уже делали недавно и не помогло — переходим к следующему кодеку.
   const probe = state.probe?.find((p) => p.name === v.codec);
   if (probe?.hardware === true && Date.now() - state.lastEncoderRestart > ENCODER_RESTART_COOLDOWN_MS) {
-    state.lastEncoderRestart = Date.now();
-    toast(`${v.codec}: аппаратный энкодер отключился (${v.impl || 'CPU'}). Перезапускаю видеосессию…`, 'warn', 7000);
-    startStreamerSession().catch((err) => toast(`Ошибка WebRTC: ${err.message}`, 'error'));
+    console.warn(`[encoder] ${v.codec}: кодирование ушло на CPU (${v.impl || 'программный энкодер'})`);
+    restartVideoEncoder('энкодер ушёл на CPU').catch((err) => toast(`Ошибка WebRTC: ${err.message}`, 'error'));
     return;
   }
   if (v.codec) session.triedCodecs.add(v.codec);
@@ -750,9 +1003,34 @@ const pushToTalk = () => state.cfg.audio.pushToTalk && Boolean(state.cfg.hotkeys
 function applyVoiceState() {
   const transmit = !state.micMuted && !state.deafened && (!pushToTalk() || state.pttHeld);
   state.mic?.setMuted(!transmit);
-  $('#voiceAudio').muted = state.deafened;
-  $('#systemAudio').muted = state.deafened;
+  state.playback.voice.setMuted(state.deafened);
+  state.playback.system.setMuted(state.deafened);
+  sendPresence();
   render();
+}
+
+/** Звук события (подключение собеседника, начало и конец трансляции), если не выключен в настройках */
+function uiCue(kind) {
+  if (state.cfg.audio.uiSounds) playCue(kind, state.cfg.audio.outputDeviceId);
+}
+
+/** Своё состояние для собеседника: 'on' | 'off' | 'ptt' | 'none' (нет микрофона) */
+function micPresence() {
+  if (!state.mic) return 'none';
+  if (state.micMuted || state.deafened) return 'off';
+  return pushToTalk() ? 'ptt' : 'on';
+}
+
+/** Сообщаем собеседнику, выключен ли у нас микрофон и звук (сигнальным сообщением — сессия не нужна) */
+function sendPresence() {
+  if (state.signaling?.state !== 'open' || !state.peer) return;
+  const presence = { mic: micPresence(), deafened: state.deafened };
+  const key = JSON.stringify(presence);
+  if (key === state.presenceSent) return;
+  state.presenceSent = key;
+  state.signaling.sendSignal({ kind: 'presence', ...presence }).then((sent) => {
+    if (!sent) state.presenceSent = null; // не ушло — повторим при следующем изменении или подключении
+  });
 }
 
 /** Как в Discord: включение микрофона при выключенном звуке включает и звук */
@@ -765,6 +1043,69 @@ function toggleMic() {
 function toggleDeafen() {
   state.deafened = !state.deafened;
   applyVoiceState();
+}
+
+// ======================= оверлей поверх игры =======================
+
+const OVERLAY_MESSAGE_MS = 8000;
+
+/** Микрофон и звук собеседника — строкой для оверлея */
+function peerStateText() {
+  const p = state.peerPresence;
+  if (!p) return '';
+  const parts = [];
+  if (p.mic === 'off') parts.push('микрофон выключен');
+  if (p.mic === 'none') parts.push('нет микрофона');
+  if (p.mic === 'ptt') parts.push('рация');
+  if (p.deafened) parts.push('не слышит');
+  return parts.join(', ');
+}
+
+/** Состояние для оверлея (src/main/overlay.js) — 10 раз в секунду, пока подключены */
+function publishOverlay() {
+  const o = state.cfg.app.overlay;
+  const active = o.enabled && Boolean(state.signaling);
+  if (!active) {
+    if (state.overlayActive) window.duo.overlay.update({ active: false });
+    state.overlayActive = false;
+    return;
+  }
+  state.overlayActive = true;
+  const micOn = Boolean(state.mic) && !state.micMuted && !state.deafened;
+  const ptt = micOn && pushToTalk();
+  const mic = !state.mic
+    ? 'нет микрофона'
+    : state.deafened
+      ? 'звук выключен'
+      : state.micMuted
+        ? 'микрофон выключен'
+        : ptt
+          ? state.pttHeld
+            ? 'рация: в эфире'
+            : 'рация'
+          : 'микрофон включён';
+  const voice = state.session?.remoteVoiceLevel() ?? 0;
+  const v = state.stats?.video;
+  const ping = state.stats?.rttMs != null ? ` · ${Math.round(state.stats.rttMs)} мс` : '';
+  let stream = '';
+  if (v) stream = `${v.direction === 'out' ? 'Стрим' : 'Смотрите'}: ${v.width}×${v.height} · ${Math.round(v.fps)} к/с · ${formatKbps(v.kbps)}${ping}`;
+  else if (state.role === 'streamer' && state.screen) stream = 'Стрим запускается…';
+  else if (state.peer) stream = `Голосовой чат${ping}`;
+  else stream = state.role === 'streamer' ? 'Ожидание зрителя' : 'Ожидание стримера';
+  const last = state.lastChat;
+  window.duo.overlay.update({
+    active,
+    corner: o.corner,
+    mic,
+    micOff: !micOn,
+    meSpeaking: micOn && (!ptt || state.pttHeld) && (state.mic?.level() ?? 0) > 0.35,
+    peerName: state.peer?.name ?? null,
+    peerSpeaking: !state.deafened && voice > 0 && 20 * Math.log10(voice) > -45,
+    peerState: peerStateText(),
+    deafened: state.deafened,
+    stream,
+    message: last && Date.now() - last.at < OVERLAY_MESSAGE_MS ? `${last.from}: ${last.text}` : null,
+  });
 }
 
 // ======================= обновления =======================
@@ -825,6 +1166,8 @@ function onHotkey({ action, phase }) {
     cue(state.deafened ? 'deafen' : 'undeafen');
   } else if (action === 'toggleDenoise' && state.mic) {
     toggleDenoise().then(() => cue(state.mic?.denoiseWanted ? 'on' : 'off'));
+  } else if (action === 'markGlitch') {
+    markGlitch(true);
   } else if (action === 'toggleStream' && state.role === 'streamer' && state.signaling) {
     if (state.screen) {
       stopStream();
@@ -852,7 +1195,10 @@ function denoiseSummary() {
   if (s === 'error') return `ошибка: ${mic.denoiseError}`;
   const p = mic.perf;
   const frameMs = (mic.frame / 48000) * 1000;
-  const gate = mic.model === 'dfn3' && state.cfg.audio.voiceGate ? `, порог открыт ${Math.round(p.gateOpen * 100)}% времени` : '';
+  const gate =
+    mic.model === 'dfn3' && state.cfg.audio.voiceGate
+      ? `, порог (${mic.vad ? 'Silero VAD' : 'по SNR'}) открыт ${Math.round(p.gateOpen * 100)}% времени`
+      : '';
   return (
     `${DENOISE_MODELS[mic.model] ?? mic.model} · ${p.avgMs.toFixed(2)} мс на кадр ${frameMs} мс ` +
     `(макс ${p.maxMs.toFixed(1)}), пропусков ${p.underruns + p.dropped}${gate}`
@@ -903,10 +1249,51 @@ async function tickStats() {
   if (monitor !== state.monitor) return;
   state.stats = stats;
   renderQuality(stats);
+  logStatsIfNeeded(stats);
   if (state.role === 'streamer') {
     if (stats.video?.direction === 'out') state.session.noteEncodedFrame(stats.video.width, stats.video.height);
     checkEncoder(stats);
   }
+}
+
+/**
+ * Сводка окна качества в журнал: раз в минуту, а сразу — когда изменилось то, что важно для разбора:
+ * кодек или (де)кодер, разрешение, путь соединения, новые фризы, потери выше 2 %, просадка FPS на треть,
+ * треск в звуке (приёмник досочиняет больше 2 % звука).
+ */
+function logStatsIfNeeded(stats) {
+  const v = stats.video;
+  const mark = {
+    video: v ? `${v.codec} ${v.impl} ${v.hw} ${v.width}x${v.height}` : '',
+    path: formatPath(stats.path),
+    freezes: v?.freezes ?? 0,
+    lossy: (v?.lossPct ?? 0) > 2,
+    crackle: (stats.audio?.concealedPct ?? 0) > 2,
+    fps: v?.fps ?? 0,
+  };
+  const last = state.statsLogged;
+  const changed =
+    !last ||
+    last.video !== mark.video ||
+    last.path !== mark.path ||
+    mark.freezes > last.freezes ||
+    (mark.lossy && !last.lossy) ||
+    (mark.crackle && !last.crackle) ||
+    mark.fps < last.fps * 0.67;
+  if (!changed && Date.now() - state.statsLoggedAt < STATS_LOG_MS) return;
+  state.statsLogged = mark;
+  state.statsLoggedAt = Date.now();
+  const counters = v ? ` | NACK ${v.nack ?? '—'}, PLI ${v.pli ?? '—'}` : '';
+  console.log(`[stats] ${describeStats(stats, hudExtras()).map(([k, val]) => `${k}: ${val}`).join(' | ')}${counters}`);
+}
+
+/** Дополнительные строки окна качества (и сводки в журнале) */
+function hudExtras() {
+  const extra = { 'Голос собеседника': voiceSummary() };
+  if (state.mic) extra['Шумодав'] = denoiseSummary();
+  if (state.capture) extra['Захват'] = captureSummary();
+  if (state.glitches) extra['Кадры-выбросы'] = glitchSummary();
+  return extra;
 }
 
 function renderQuality(stats) {
@@ -923,9 +1310,7 @@ function renderQuality(stats) {
     $('#qualityText').textContent = `${out ? '↑' : '↓'} ${formatKbps(kbps)} · ${ping} · потери ${loss}`;
   }
   if (state.hudOpen) {
-    const extra = { 'Голос собеседника': voiceSummary() };
-    if (state.mic) extra['Шумодав'] = denoiseSummary();
-    if (state.capture) extra['Захват'] = captureSummary();
+    const extra = hudExtras();
     if (stats) {
       renderList($('#hudList'), describeStats(stats, extra));
     } else if (state.session) {
@@ -958,8 +1343,8 @@ async function saveSettings(next) {
     if (!result.ok) toast(`Список IP не применён: ${result.error}`, 'error', 8000);
   }
   if (prev.audio.outputDeviceId !== cfg.audio.outputDeviceId) {
-    await applySink($('#voiceAudio'));
-    await applySink($('#systemAudio'));
+    await applySink(state.playback.voice);
+    await applySink(state.playback.system);
   }
 
   const pv = prev.video;
@@ -975,8 +1360,8 @@ async function saveSettings(next) {
       await track.applyConstraints(captureConstraints(cv)).catch((err) => toast(`Параметры захвата: ${err.message}`, 'warn'));
       const s = track.getSettings();
       Object.assign(state.capture, { width: s.width, height: s.height });
-      if (state.session?.wouldGrowFrame(s.width * s.height)) await startStreamerSession();
-      else sendStreamState();
+      if (state.session?.wouldGrowFrame(s.width * s.height)) await restartVideoEncoder('изменён размер захвата');
+      sendStreamState();
     }
   }
 
@@ -1008,6 +1393,7 @@ async function collectDiagnostics() {
   const devices = info.gpu.devices;
   for (const g of devices) rows.push([g.active ? 'GPU (используется)' : 'GPU', `${g.vendor} ${g.description || g.deviceId}`]);
   if (info.gpu.renderer) rows.push(['Рендерер', info.gpu.renderer]);
+  if (info.elevated) rows.push(['Внимание', 'Запущено от имени администратора: перетаскивание файлов из Проводника не работает']);
   const active = devices.find((g) => g.active);
   if (active && active.vendor !== 'NVIDIA' && devices.some((g) => g.vendor === 'NVIDIA')) {
     rows.push([
@@ -1073,7 +1459,12 @@ function render() {
   }
   $('#status').dataset.tone = tone;
   $('#statusText').textContent = text;
-  $('#peerName').textContent = state.peer ? `${ROLE_NAME[state.peer.role]}: ${state.peer.name}` : '';
+  const presence = state.peer ? state.peerPresence : null;
+  const ptt = presence?.mic === 'ptt' ? ' · рация' : '';
+  $('#peerName').textContent = state.peer ? `${ROLE_NAME[state.peer.role]}: ${state.peer.name}${ptt}` : '';
+  $('#peerMicOff').hidden = !presence || !['off', 'none'].includes(presence.mic);
+  $('#peerMicOff').title = presence?.mic === 'none' ? 'У собеседника нет микрофона' : 'У собеседника выключен микрофон';
+  $('#peerDeafened').hidden = !presence?.deafened;
 
   // Сцена
   let message = null;
@@ -1114,7 +1505,6 @@ function render() {
   const video = $('#video');
   if (video.srcObject !== videoStream) video.srcObject = videoStream;
   video.hidden = !videoStream;
-  video.classList.toggle('remote', !streamer && Boolean(videoStream));
   $('#previewBadge').hidden = !(streamer && videoStream);
 
   $('#connectCard').hidden = connected;
@@ -1130,6 +1520,7 @@ function render() {
   const share = Boolean(message) && streamer && Boolean(state.share) && !state.peer;
   $('#shareBox').hidden = !share;
   if (share) $('#shareAddress').textContent = state.share.address;
+  $('#shareNote').textContent = share ? upnpNote() : '';
 
   // Кнопки
   const streamBtn = $('#btnStream');
@@ -1167,18 +1558,67 @@ function render() {
   $('#denoiseText').textContent = { on: 'Шумодав', off: 'Шумодав выкл', loading: 'Шумодав…', error: 'Шумодав: ошибка' }[ds];
 
   $('#streamVolumeWrap').hidden = streamer;
+  $('#streamSendWrap').hidden = !streamer;
+  // Отметка глюка — когда есть собеседник и идёт видео (у кого-то из двоих)
+  $('#btnMarkGlitch').hidden = !state.peer || !(state.screen || state.remote?.live);
+  chatPanel?.setAvailable(Boolean(state.peer));
 }
 
 function toggleFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
-  else $('#stage').requestFullscreen().catch(() => {});
+  else document.documentElement.requestFullscreen().catch(() => {});
 }
 
+const FULLSCREEN_IDLE_MS = 2500;
+
+/**
+ * Во весь экран — всё окно: верхняя панель прячется, нижняя висит поверх видео. Через 2,5 с без движения
+ * мыши панель и курсор исчезают; движение мыши, клавиша или наведение на низ экрана возвращают их. Пока
+ * курсор над панелью или открыт диалог — панель не прячется.
+ */
+function setupFullscreenIdle() {
+  const controls = $('.controls');
+  let timer = 0;
+  let hovering = false;
+  const busy = () => hovering || document.querySelector('dialog[open]');
+  const hideLater = () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (!document.fullscreenElement) return;
+      if (busy()) hideLater();
+      else document.body.classList.add('idle');
+    }, FULLSCREEN_IDLE_MS);
+  };
+  const wake = () => {
+    document.body.classList.remove('idle');
+    if (document.fullscreenElement) hideLater();
+  };
+  document.addEventListener('fullscreenchange', () => {
+    document.body.classList.toggle('fs', Boolean(document.fullscreenElement));
+    wake();
+  });
+  document.addEventListener('mousemove', (e) => {
+    // Подрагивание на 1–2 пикселя (стол, касание мыши) панель не будит
+    if (Math.abs(e.movementX) + Math.abs(e.movementY) > 2 || e.clientY > window.innerHeight - 80) wake();
+  });
+  document.addEventListener('mousedown', wake);
+  document.addEventListener('keydown', wake);
+  controls.addEventListener('mouseenter', () => (hovering = true));
+  controls.addEventListener('mouseleave', () => {
+    hovering = false;
+    wake();
+  });
+}
+
+/** Ползунки громкости (в процентах, выше 100 — усиление) и их запомненные значения */
 function restoreVolumes() {
-  for (const [inputId, audioId] of [
-    ['voiceVolume', 'voiceAudio'],
-    ['streamVolume', 'systemAudio'],
-  ]) {
+  const sliders = [
+    ['voiceVolume', 'Голос собеседника', (v) => state.playback.voice.setVolume(v)],
+    ['streamVolume', 'Звук трансляции', (v) => state.playback.system.setVolume(v)],
+    // Стример: насколько громко звук игры/окна уходит зрителю
+    ['streamSendVolume', 'Звук трансляции для зрителя', (v) => state.capture?.sendGain?.setVolume(v)],
+  ];
+  for (const [inputId, title, apply] of sliders) {
     const input = $(`#${inputId}`);
     try {
       const saved = localStorage.getItem(inputId);
@@ -1186,9 +1626,13 @@ function restoreVolumes() {
     } catch {
       // хранилище недоступно — оставляем значение по умолчанию
     }
-    $(`#${audioId}`).volume = Number(input.value) / 100;
+    const update = () => {
+      apply(Number(input.value) / 100);
+      input.closest('label').title = `${title}: ${input.value}%`;
+    };
+    update();
     input.addEventListener('input', () => {
-      $(`#${audioId}`).volume = Number(input.value) / 100;
+      update();
       try {
         localStorage.setItem(inputId, input.value);
       } catch {
@@ -1217,6 +1661,10 @@ function bindEvents() {
   $('#btnDeafen').addEventListener('click', toggleDeafen);
   window.duo.hotkeys.onAction(onHotkey);
   window.duo.update.onState(onUpdateState);
+  window.duo.onMainError((message) => toast(`Ошибка в главном процессе: ${message}`, 'error', 10000));
+  window.duo.appAudio.onEnded((session, message) => {
+    if (state.capture?.appAudio?.session === session) toast(`Звук окна прервался: ${message}`, 'warn', 8000);
+  });
   $('#btnDenoise').addEventListener('click', toggleDenoise);
   $('#btnQuality').addEventListener('click', () => {
     state.hudOpen = !state.hudOpen;
@@ -1224,6 +1672,8 @@ function bindEvents() {
     renderQuality(state.stats);
   });
   $('#btnFullscreen').addEventListener('click', toggleFullscreen);
+  $('#btnMarkGlitch').addEventListener('click', () => markGlitch(true));
+  setupFullscreenIdle();
   $('#video').addEventListener('dblclick', toggleFullscreen);
   $('#btnSettings').addEventListener('click', () =>
     settingsDialog.open(state.cfg, state.configPath, { viewerIp: state.role === 'streamer' ? state.peer?.ip : null }),
@@ -1250,13 +1700,38 @@ async function init() {
   window.duo.nativeCapture.onEvent(onNativeEvent);
 
   settingsDialog = new SettingsDialog({ onSave: saveSettings, getDiagnostics: collectDiagnostics });
+  chatPanel = new ChatPanel(state.chat, {
+    peerName: () => state.peer?.name ?? 'Собеседник',
+    canSend: () => Boolean(state.peer),
+  });
   fillConnectForm();
   bindEvents();
+  state.playback = { voice: new Playback($('#voiceAudio')), system: new Playback($('#systemAudio')) };
   restoreVolumes();
   refreshOutputs();
   render();
   setInterval(() => tickStats().catch((err) => console.warn('[stats]', err)), 1000);
   requestAnimationFrame(meterLoop);
+  setInterval(publishOverlay, 100);
+  // Запуск «от имени администратора» ломает перетаскивание файлов из Проводника — предупреждаем
+  setTimeout(async () => {
+    const info = await window.duo.getAppInfo().catch(() => null);
+    if (info?.elevated) {
+      toast(
+        'DuoStream запущен от имени администратора — Windows не даёт перетаскивать в него файлы из Проводника. Запустите без прав администратора (или отправляйте файлы скрепкой в чате).',
+        'warn',
+        0,
+      );
+    }
+  }, 3000);
+  // Последнее входящее сообщение — в оверлей на несколько секунд
+  state.chat.addEventListener('change', (e) => {
+    const item = e.detail.item;
+    if (item && !item.mine && (item.kind === 'msg' || item.status === 'offered')) {
+      const text = item.kind === 'msg' ? item.text : `файл «${item.name}»`;
+      state.lastChat = { from: state.peer?.name ?? 'Собеседник', text: text.slice(0, 200), at: Date.now() };
+    }
+  });
 }
 
 init().catch((err) => {

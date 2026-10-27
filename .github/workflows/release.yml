@@ -68,6 +68,23 @@ jobs:
           "VERSION=$version" >> $env:GITHUB_ENV
           ./scripts/dist.ps1
 
+      # Описание релиза — верхний раздел CHANGELOG.md (от первого «## » до следующего) и ссылка
+      # на все коммиты с прошлого релиза
+      - name: Описание релиза из CHANGELOG.md
+        run: |
+          git fetch --tags --quiet
+          $lines = Get-Content CHANGELOG.md -Encoding utf8
+          $start = ($lines | Select-String -Pattern '^## ' | Select-Object -First 1).LineNumber
+          if (-not $start) { throw 'В CHANGELOG.md нет ни одного раздела «## …»' }
+          $rest = $lines[$start..($lines.Count - 1)]
+          $next = ($rest | Select-String -Pattern '^## ' | Select-Object -First 1).LineNumber
+          $body = if ($next) { $rest[0..($next - 2)] } else { $rest }
+          $notes = ($body -join "`n").Trim()
+          $prev = git tag --list 'v*' --sort=-v:refname | Select-Object -First 1
+          if ($prev) { $notes += "`n`n**Все изменения:** https://github.com/${{ github.repository }}/compare/$prev...v$env:VERSION" }
+          Set-Content -Path "$env:RUNNER_TEMP/notes.md" -Value $notes -Encoding utf8
+          Write-Host $notes
+
       # Один вызов gh: создаёт релиз черновиком, загружает файлы и публикует — тег v<версия> ставится
       # на собранный коммит. latest.yml нужен автообновлению (client/src/main/updater.js).
       - name: Публикация релиза
@@ -79,5 +96,5 @@ jobs:
           gh release create "v$v" `
             "DuoStream-Setup-$v.exe" "DuoStream-Setup-$v.exe.blockmap" "latest.yml" "DuoStream-$v-portable.exe" `
             --repo "${{ github.repository }}" --target "${{ github.sha }}" `
-            --title "DuoStream $v" --generate-notes
+            --title "DuoStream $v" --notes-file "$env:RUNNER_TEMP/notes.md"
           exit $LASTEXITCODE

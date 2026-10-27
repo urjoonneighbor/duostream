@@ -238,4 +238,4 @@ class NativeCapture {
   }
 }
 
-module.exports = { NativeCapture };
+module.exports = { NativeCapture, helperPath };

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'" />
+    <title>DuoStream — оверлей</title>
+    <link rel="stylesheet" href="overlay.css" />
+    <script type="module" src="js/overlay.js"></script>
+  </head>
+  <body>
+    <div class="card" id="card" hidden>
+      <div class="row" id="rowMe">
+        <span class="dot"></span><span class="name">Вы</span><span class="state" id="meState"></span>
+      </div>
+      <div class="row" id="rowPeer">
+        <span class="dot"></span><span class="name" id="peerName">Собеседник</span><span class="state" id="peerState"></span>
+      </div>
+      <div class="line" id="stream"></div>
+      <div class="message" id="message" hidden></div>
+    </div>
+  </body>
+</html>

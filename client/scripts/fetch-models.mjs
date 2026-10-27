@@ -1,6 +1,7 @@
 // Скачивает ONNX-модели шумодава и сверяет SHA-256:
 //  • DeepFilterNet3 (MIT/Apache-2.0, github.com/Rikorose/DeepFilterNet) — потоковый экспорт torchDF
 //    (github.com/grazder/DeepFilterNet), зеркало huggingface.co/kimtos-labs/denoiser-dfn3;
+//  • Silero VAD (MIT, github.com/snakers4/silero-vad) — распознаватель речи для голосового порога;
 //  • DTLN (MIT, github.com/breizhn/DTLN).
 // Модели уже лежат в репозитории; скрипт нужен, если их удалили или хочется перекачать.
 import crypto from 'node:crypto';
@@ -20,6 +21,13 @@ const FILES = [
     sha256: 'fe5eb64fa2e4154c83f8e4935e82871c850c154387ee892e0ab65fe179e7d8c9',
   },
   { dir: 'dfn3', name: 'LICENSE-MIT', url: 'https://raw.githubusercontent.com/Rikorose/DeepFilterNet/main/LICENSE-MIT' },
+  {
+    dir: 'silero',
+    name: 'silero_vad.onnx',
+    url: 'https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx',
+    sha256: '1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3',
+  },
+  { dir: 'silero', name: 'LICENSE', url: 'https://raw.githubusercontent.com/snakers4/silero-vad/master/LICENSE' },
   {
     dir: 'dtln',
     name: 'model_1.onnx',

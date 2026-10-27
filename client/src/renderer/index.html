@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob: mediastream:; connect-src 'self' ws: wss:; worker-src 'self'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' ws: wss:; worker-src 'self'"
     />
     <title>DuoStream</title>
     <link rel="stylesheet" href="styles.css" />
@@ -12,12 +12,14 @@
   </head>
   <body>
     <header class="topbar">
-      <div class="brand"><span class="logo" aria-hidden="true"></span>DuoStream</div>
+      <div class="brand"><img class="logo" src="img/icon.svg" alt="" />DuoStream</div>
       <div class="status" id="status" data-tone="idle">
         <span class="dot"></span><span id="statusText">Не подключено</span>
       </div>
       <div class="spacer"></div>
       <span class="peer" id="peerName"></span>
+      <span class="peer-state" id="peerMicOff" title="У собеседника выключен микрофон" hidden><i data-icon="micOff"></i></span>
+      <span class="peer-state" id="peerDeafened" title="У собеседника выключен звук — он вас не слышит" hidden><i data-icon="headphonesOff"></i></span>
       <button class="icon-btn" id="btnSettings" title="Настройки" data-icon="sliders"></button>
     </header>
 
@@ -66,9 +68,25 @@
             <span>Адрес для зрителя (пароль тот же):</span>
             <code id="shareAddress"></code>
             <button type="button" id="btnCopyAddress">Копировать</button>
+            <p class="hint" id="shareNote"></p>
           </div>
         </div>
       </div>
+
+      <aside class="chat" id="chatPanel" hidden>
+        <header>
+          <h3>Чат</h3>
+          <span class="hint" id="chatStatus"></span>
+          <button type="button" class="icon-btn ghost" id="chatClose" title="Закрыть" data-icon="close"></button>
+        </header>
+        <div class="chat-list" id="chatList"></div>
+        <form class="chat-form" id="chatForm">
+          <button type="button" class="icon-btn" id="chatAttach" title="Отправить файлы любого размера (можно перетащить в окно или вставить скриншот Ctrl+V)" data-icon="clip"></button>
+          <textarea id="chatInput" rows="1" placeholder="Сообщение или Ctrl+V — скриншот" maxlength="20000"></textarea>
+          <button type="submit" class="icon-btn primary" id="chatSend" title="Отправить" data-icon="send"></button>
+          <input type="file" id="chatFile" multiple hidden />
+        </form>
+      </aside>
 
       <aside class="hud" id="hud" hidden>
         <h3>Качество соединения</h3>
@@ -94,19 +112,32 @@
         </button>
         <label class="volume" title="Громкость собеседника; индикатор — уровень его голоса, который до нас доходит">
           <span>Голос</span><span class="meter"><i id="voiceLevel"></i></span>
-          <input type="range" id="voiceVolume" min="0" max="100" value="100" />
+          <input type="range" id="voiceVolume" min="0" max="300" step="5" value="100" />
         </label>
         <label class="volume" id="streamVolumeWrap" title="Громкость звука трансляции" hidden>
-          <span>Стрим</span><input type="range" id="streamVolume" min="0" max="100" value="80" />
+          <span>Стрим</span><input type="range" id="streamVolume" min="0" max="200" step="5" value="80" />
+        </label>
+        <label class="volume" id="streamSendWrap" title="Звук трансляции для зрителя" hidden>
+          <span>Стрим</span><input type="range" id="streamSendVolume" min="0" max="200" step="5" value="100" />
         </label>
       </div>
       <div class="group right">
+        <button class="icon-btn chat-toggle" id="btnChat" title="Чат и файлы (можно перетащить файл в окно)" disabled>
+          <i data-icon="chat"></i><span class="count" id="chatBadge" hidden></span>
+        </button>
         <button class="quality" id="btnQuality" data-quality="unknown" title="Подробная статистика">
           <span class="bars"><i></i><i></i><i></i></span><span id="qualityText">Нет соединения</span>
         </button>
+        <button class="icon-btn" id="btnMarkGlitch" title="Отметить глюк картинки (Ctrl + Shift + G): последние 2 с кадров сохранятся у обоих рядом с журналом" data-icon="flag" hidden></button>
         <button class="icon-btn" id="btnFullscreen" title="Во весь экран (двойной клик по видео)" data-icon="fullscreen"></button>
       </div>
     </footer>
+
+    <!-- Картинка из чата во весь размер -->
+    <dialog id="imageView" class="image-view">
+      <img id="imageViewImg" alt="" />
+      <div class="image-view-name" id="imageViewName"></div>
+    </dialog>
 
     <audio id="voiceAudio" autoplay></audio>
     <audio id="systemAudio" autoplay></audio>
@@ -211,6 +242,17 @@
           </div>
           <label class="check"><input type="checkbox" id="sPreferHw" /><span>Аппаратный энкодер в приоритете (автопереключение кодека, если кодирование ушло на CPU)</span></label>
           <label class="check"><input type="checkbox" id="sPreview" /><span>Показывать предпросмотр своей трансляции</span></label>
+          <div class="row">
+            <label class="field" title="Если у зрителя картинка мигает или идёт пятнами только на экране, а в отметке глюка кадры целые, — виноват путь вывода через видеокарту: попробуйте другой. Действует после перезапуска, у стримера не действует.">
+              <span>Вывод видео у зрителя (после перезапуска)</span>
+              <select id="sRenderer">
+                <option value="d3d11">Видеокарта · Direct3D 11 (по умолчанию)</option>
+                <option value="opengl">Видеокарта · OpenGL (видео декодирует процессор)</option>
+                <option value="vulkan">Vulkan · окно и видео на процессоре (почти как без видеокарты)</option>
+                <option value="software">Без видеокарты · всё на процессоре (возможен треск звука)</option>
+              </select>
+            </label>
+          </div>
         </section>
 
         <section data-panel="audio" hidden>
@@ -257,9 +299,11 @@
             </label>
           </div>
           <label class="check"><input type="checkbox" id="sSystemAudio" /><span>Стример: по умолчанию передавать системный звук</span></label>
+          <label class="check"><input type="checkbox" id="sUiSounds" /><span>Звуки событий: собеседник подключился или вышел, трансляция началась или закончилась</span></label>
           <p class="hint">
-            Системный звук захватывается в стерео с устройства вывода по умолчанию — без звуков самого DuoStream,
-            поэтому голос зрителя в трансляцию не попадает и он не слышит сам себя.
+            При трансляции окна передаётся звук только его приложения (другие окна, музыка и уведомления зритель
+            не услышит). При трансляции экрана — весь системный звук, кроме звуков самого DuoStream, поэтому
+            голос зрителя в трансляцию не попадает.
           </p>
           <p class="hint">
             Не слышно собеседника? Нажмите «Проверить»: если сигнала нет, выберите устройство, к которому
@@ -288,6 +332,7 @@
               (динамический у провайдера), добавьте подсеть или оставьте поле пустым — вход всё равно по паролю.
             </p>
           </div>
+          <label class="check"><input type="checkbox" id="sUpnp" /><span>Стример: открывать порты на роутере автоматически (UPnP), пока идёт сеанс — ручной проброс не нужен</span></label>
           <label class="field">
             <span>Белый IP стримера (необязательно — определяется автоматически)</span>
             <input id="sPublicIp" placeholder="203.0.113.10" spellcheck="false" />
@@ -321,6 +366,18 @@
             <span>Рация: выключать микрофон через, мс после отпускания (чтобы не обрезать конец слова)</span>
             <input id="sPttRelease" type="number" min="0" max="2000" step="50" />
           </label>
+          <div class="row">
+            <label class="check"><input type="checkbox" id="sOverlay" /><span>Оверлей поверх игры: микрофон, кто говорит, стрим, сообщения чата (виден, пока окно DuoStream неактивно; в трансляцию не попадает)</span></label>
+            <label class="field">
+              <span>Угол экрана</span>
+              <select id="sOverlayCorner">
+                <option value="top-left">Слева сверху</option>
+                <option value="top-right">Справа сверху</option>
+                <option value="bottom-left">Слева снизу</option>
+                <option value="bottom-right">Справа снизу</option>
+              </select>
+            </label>
+          </div>
           <p class="hint">
             Если игра запущена от имени администратора, Windows не показывает её нажатия обычным программам —
             тогда и DuoStream запускайте от имени администратора.
@@ -329,6 +386,13 @@
         </section>
 
         <section data-panel="diag" hidden>
+          <div class="with-button">
+            <p class="hint">
+              Журнал сеанса пишется всегда. Если что-то пошло не так — пришлите файл журнала (и картинки
+              «…-glitch-N.png» рядом с ним, если есть): в нём подключение, сеть, кодек, захват и сбои по времени.
+            </p>
+            <button type="button" id="btnRevealLog">Показать файл журнала</button>
+          </div>
           <dl class="diag" id="diagList"></dl>
         </section>
 

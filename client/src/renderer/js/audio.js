@@ -57,7 +57,7 @@ export class MicPipeline extends EventTarget {
     this.worker.onmessage = (event) => {
       const msg = event.data;
       if (msg.type === 'ready') {
-        Object.assign(this, { denoiseEngine: 'ready', model: msg.model, frame: msg.frame, denoiseWarning: msg.warning });
+        Object.assign(this, { denoiseEngine: 'ready', model: msg.model, frame: msg.frame, vad: msg.vad, denoiseWarning: msg.warning });
         this.applyDenoise();
       } else if (msg.type === 'error') {
         this.denoiseEngine = 'error';

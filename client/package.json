@@ -59,6 +59,7 @@
       }
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis",
         "portable"
@@ -78,6 +79,8 @@
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "DuoStream",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
       "runAfterFinish": true,
       "artifactName": "${productName}-Setup-${version}.${ext}"
     },

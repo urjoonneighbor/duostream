@@ -1,0 +1,71 @@
+/* Оверлей поверх игры: прозрачное окно, плашка в углу */
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  color: #e7e9ee;
+  user-select: none;
+}
+.card {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 284px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(13, 15, 19, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.card[hidden],
+.message[hidden] {
+  display: none;
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #4a5160;
+  transition: background 0.08s, box-shadow 0.08s;
+}
+.row.speaking .dot {
+  background: #3ccf7a;
+  box-shadow: 0 0 8px #3ccf7a;
+}
+.name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+.state {
+  color: #8b93a3;
+  font-size: 12px;
+  margin-left: auto;
+}
+.state.off {
+  color: #f2555a;
+}
+.line {
+  color: #8b93a3;
+  font-size: 12px;
+}
+.message {
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
