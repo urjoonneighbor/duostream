@@ -5,8 +5,8 @@
 
 ```powershell
 npm install
-npm test
-npm start
+npm test   # проверка типов и тесты (Node 22.18+ запускает .ts напрямую)
+npm start  # сборка src/*.ts → dist/ и запуск dist/server.js
 ```
 
 Перед первым запуском задайте `password` в `config.json` или переменную `DUO_PASSWORD`. Слабый

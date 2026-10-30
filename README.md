@@ -73,32 +73,33 @@ duostream/
 │  ├─ 03-static-ip.md            ← белый статический IP у провайдера
 │  ├─ 04-optional-turn.md        ← резервный TURN (coturn), необязательно
 │  └─ 05-config.md               ← описание всех параметров конфигурации
-├─ server/                       ← сигнальный сервер (Node.js + ws); тот же код встроен в приложение
+├─ server/                       ← сигнальный сервер (Node.js + ws, TypeScript); тот же код встроен в приложение
 │  ├─ config.json                ← порт и общий пароль (для запуска отдельным процессом)
-│  ├─ src/server.js, src/crypto.js
-│  └─ test/server.test.js        ← npm test
-└─ client/                       ← десктопное приложение (Electron)
+│  ├─ src/server.ts, src/crypto.ts  → dist/ (npm run build)
+│  └─ test/server.test.ts        ← npm test
+└─ client/                       ← десктопное приложение (Electron, TypeScript → app/ при npm run build)
    ├─ config/stream.config.default.json ← настройки по умолчанию: разрешение, FPS, битрейт, кодеки, звук, сеть
    ├─ native/capture/            ← собственный захват 120 FPS (C#, .NET 10) → native/bin/duostream-capture.exe
    ├─ src/main/                  ← главный процесс: флаги Chromium, порты, захват, конфиг
-   │  ├─ embedded-server.js      ← встроенный сигнальный сервер стримера
-   │  ├─ hotkeys.js              ← глобальные горячие клавиши (uiohook-napi)
-   │  ├─ updater.js              ← обновления из GitHub Releases (electron-updater)
-   │  ├─ upnp.js                 ← автоматический проброс портов на роутере (UPnP IGD)
-   │  └─ native-capture.js       ← запуск процесса захвата, импорт текстур (sharedTexture)
+   │  ├─ embedded-server.ts      ← встроенный сигнальный сервер стримера
+   │  ├─ hotkeys.ts              ← глобальные горячие клавиши (uiohook-napi)
+   │  ├─ updater.ts              ← обновления из GitHub Releases (electron-updater)
+   │  ├─ upnp.ts                 ← автоматический проброс портов на роутере (UPnP IGD)
+   │  └─ native-capture.ts       ← запуск процесса захвата, импорт текстур (sharedTexture)
    ├─ src/preload/               ← мост main ↔ интерфейс
+   ├─ src/shared/                ← общие типы: настройки (config.d.ts), API window.duo (duo-api.d.ts)
    ├─ src/renderer/
    │  ├─ index.html, styles.css
-   │  ├─ js/app.js               ← логика интерфейса
-   │  ├─ js/peer.js              ← WebRTC-сессия, проброшенные порты, ICE restart
-   │  ├─ js/native-capture.js    ← кадры-текстуры → MediaStreamTrackGenerator
-   │  ├─ js/signaling.js, crypto.js
-   │  ├─ js/codecs.js, sdp.js    ← выбор AV1/H264/VP9, битрейт и Opus через SDP
-   │  ├─ js/stats.js             ← битрейт, пинг, потери, кодек, HW/SW
-   │  ├─ js/audio.js             ← микрофонный тракт
-   │  ├─ js/tones.js             ← звуковые сигналы (проверка вывода, подтверждение клавиш)
-   │  ├─ audio/                  ← AudioWorklet + Web Worker; dfn-core.js — DeepFilterNet3 и голосовой
-   │  │                            порог, dtln-core.js — лёгкая запасная модель (FFT, ресемплеры)
+   │  ├─ js/app.ts               ← логика интерфейса
+   │  ├─ js/peer.ts              ← WebRTC-сессия, проброшенные порты, ICE restart
+   │  ├─ js/native-capture.ts    ← кадры-текстуры → MediaStreamTrackGenerator
+   │  ├─ js/signaling.ts, crypto.ts
+   │  ├─ js/codecs.ts, sdp.ts    ← выбор AV1/H264/VP9, битрейт и Opus через SDP
+   │  ├─ js/stats.ts             ← битрейт, пинг, потери, кодек, HW/SW
+   │  ├─ js/audio.ts             ← микрофонный тракт
+   │  ├─ js/tones.ts             ← звуковые сигналы (проверка вывода, подтверждение клавиш)
+   │  ├─ audio/                  ← AudioWorklet + Web Worker; dfn-core.ts — DeepFilterNet3 и голосовой
+   │  │                            порог, dtln-core.ts — лёгкая запасная модель (FFT, ресемплеры)
    │  └─ models/                 ← ONNX-модели: dfn3/ (DeepFilterNet3, MIT/Apache-2.0), silero/ (Silero VAD, MIT),
    │                               dtln/ (MIT)
    └─ scripts/                   ← dist (сборка exe), copy-ort, build-native, fetch-models, test-denoiser
@@ -140,7 +141,7 @@ duostream/
 - **AV1 кодируется аппаратно**: `MediaFoundationVideoEncodeAccelerator (NVIDIA AV1 Encoder MFT)`,
   у зрителя аппаратное декодирование `D3D11VideoDecoder`, 2560×1440, без потерь.
 - Битрейт: оценка канала стартует с ~10 Мбит/с и не опускается ниже заданных 8000 кбит/с; на
-  динамичной картинке 15–17.5 Мбит/с. Без исправления (см. `sdp.js`) старт был ~2 Мбит/с.
+  динамичной картинке 15–17.5 Мбит/с. Без исправления (см. `sdp.ts`) старт был ~2 Мбит/с.
 - **Собственный захват, 120 FPS:** экран 2560×1440 — ~119 FPS кодирования на `NVIDIA AV1 Encoder MFT`
   и столько же у зрителя (аппаратное декодирование), копирование кадра ~0,2 мс, 30 секунд без пропусков;
   с масштабом до 1920×1080 — тоже ~120 FPS. Окно, меняющее размер, захватывается без искажения пропорций.
@@ -149,7 +150,7 @@ duostream/
   останавливает трансляцию. Системный звук при собственном захвате передаётся.
 - Смена источника и рост окна не оставляют кодирование на CPU: Chromium при увеличении кадра уходит с NVENC
   на libaom, приложение пересоздаёт сессию (у окна — через ~1,5 с после ресайза).
-- Шумодав DeepFilterNet3 (речь с шумом, `scripts/test-denoiser.mjs`): SI-SDR +9.6 дБ при SNR 5 дБ и
+- Шумодав DeepFilterNet3 (речь с шумом, `scripts/test-denoiser.mts`): SI-SDR +9.6 дБ при SNR 5 дБ и
   +11.9 дБ при SNR 0 дБ (у DTLN +8.5 и +10.6); фон в длинной паузе ослаблен на 40 дБ (с −35 до −75 дБFS),
   с голосовым порогом — полная тишина, щелчки клавиатуры тоже; речь порог не обрезает (SI-SDR тот же).
   Задержка 30 мс, в приложении ~2 мс CPU на 10 мс звука, без пропусков.

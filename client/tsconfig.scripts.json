@@ -1,0 +1,13 @@
+{
+  // Скрипты сборки и проверки: Node запускает .ts напрямую, здесь только проверка типов
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "lib": ["es2023"],
+    "types": ["node"],
+    "rootDir": ".",
+    "noEmit": true
+  },
+  "include": ["scripts/**/*.mts", "src/renderer/audio/*-core.ts", "src/renderer/audio/ort-types.ts"]
+}

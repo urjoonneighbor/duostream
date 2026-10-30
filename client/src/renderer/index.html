@@ -347,8 +347,8 @@
             <label class="check"><input type="checkbox" id="sForceRelay" /><span>Только через TURN (для проверки релея)</span></label>
           </fieldset>
           <label class="field">
-            <span>Целевой джиттер-буфер зрителя, мс (0 — автоматически)</span>
-            <input id="sJitter" type="number" min="0" max="4000" step="10" />
+            <span>Запас буфера трансляции у зрителя, мс (видео и звук; 0 — минимальная задержка, звук может трещать)</span>
+            <input id="sJitter" type="number" min="0" max="2000" step="10" />
           </label>
           <p class="hint">Сетевые настройки применяются при следующем подключении.</p>
           <label class="check"><input type="checkbox" id="sAutoUpdate" /><span>Проверять обновления на GitHub (установленная версия обновляется при выходе, portable — сообщает о новой версии)</span></label>

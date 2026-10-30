@@ -2,6 +2,9 @@ node_modules/
 # Личные настройки с паролем (шаблон — client/config/stream.config.default.json)
 client/config/stream.config.json
 client/dist/
+# Собранный TypeScript (npm run build): client/app, server/dist
+client/app/
+server/dist/
 client/build-tools/
 client/test-output/
 # Копируется из node_modules при npm install (scripts/copy-ort.mjs)

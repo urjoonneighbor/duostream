@@ -105,7 +105,9 @@ npm install
 npm run build:native
 ```
 
-Модели шумодава уже лежат в `src/renderer/models` (`dfn3` — DeepFilterNet3, `dtln` — запасная DTLN). Запуск:
+Модели шумодава уже лежат в `src/renderer/models` (`dfn3` — DeepFilterNet3, `dtln` — запасная DTLN).
+Приложение и сервер написаны на TypeScript: `npm start` сначала собирает их (`npm run build` →
+`client/app` и `server/dist`), поэтому зависимости нужны в обеих папках — и в `server`, и в `client`. Запуск:
 
 ```powershell
 npm start
@@ -161,7 +163,7 @@ npm run test:denoiser
 ```
 
 Можно передать свою запись голоса (WAV 16-bit или float) и SNR в дБ, модель, предел подавления,
-вид шума и голосовой порог: `node scripts/test-denoiser.mjs voice.wav 5 --model=dfn3 --limit=0 --noise=keys --gate`.
+вид шума и голосовой порог: `node scripts/test-denoiser.mts voice.wav 5 --model=dfn3 --limit=0 --noise=keys --gate`.
 Без записи используется синтетический «гудок» — DeepFilterNet3 его справедливо глушит, поэтому тогда
 проверяется только подавление шума в паузах.
 
@@ -202,7 +204,7 @@ npm run test:denoiser
 npm run dist
 ```
 
-Скрипт `scripts/dist.ps1` собирает захват 120 FPS (нужен .NET SDK 10), скачивает Electron, если
+Скрипт `scripts/dist.ps1` собирает TypeScript (`npm run build`), захват 120 FPS (нужен .NET SDK 10), скачивает Electron, если
 его ещё нет (`npm start` можно не запускать), и инструменты упаковки (7-Zip и NSIS) — через PowerShell
 с проверкой SHA-256 (из Node загрузки с GitHub на некоторых сетях обрываются) — и запускает
 electron-builder. Результат в `client/dist`:

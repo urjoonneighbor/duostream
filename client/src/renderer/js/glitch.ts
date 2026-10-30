@@ -1,0 +1,149 @@
+// Зритель: детектор кадров-выбросов — коротких визуальных глюков (сдвиг, разрыв, «копии» картинки, пятна).
+//
+// Выброс — одиночный кадр, который сильно отличается и от предыдущего, и от следующего, хотя они между собой
+// похожи. Обычная смена сцены так не выглядит: новый кадр похож на следующий. Сравнение — по уменьшенной
+// до 64×36 яркости каждого показанного кадра. Найденный кадр и соседние сохраняются картинкой рядом
+// с журналом сеанса: глюк длиной в кадр скриншотер не ловит, а так он будет в файле.
+//
+// Детектор видит кадры после декодирования. Если глюк виден на экране, а детектор молчит — ломается вывод
+// на экран (видеокарта), а не передача и не декодер.
+
+const W = 64;
+const H = 36;
+const THRESHOLD = 10; // средняя разница яркости 0..255, выше — «другой кадр»
+const SIMILAR = 0.4; // соседи выброса похожи между собой: их разница меньше 40% от разницы с выбросом
+const MAX_SAVED = 20; // картинок за сеанс
+const FLASH_BRIGHTER = 12; // вспышка: средняя яркость выше обоих соседей хотя бы на столько (0..255)
+const FLAT_STD = 12; // кадр почти однотонный (засвечен целиком)
+const DARKER_BY = 8; // пиксель «потемнел»: темнее обоих соседних кадров больше чем на столько
+const DARKER_SHARE = 0.03; // у вспышки таких пикселей меньше 3%
+
+/** Найденный кадр-выброс; image — «до — глюк — после» (data:image/png) */
+export interface GlitchInfo {
+  at: string;
+  size: string;
+  diffPrev: string;
+  diffNext: string;
+  diffNeighbours: string;
+  image?: string;
+}
+
+interface Frame {
+  luma: Uint8Array;
+  bitmap: ImageBitmap;
+  time: number;
+  w: number;
+  h: number;
+}
+
+export class GlitchDetector {
+  private readonly video: HTMLVideoElement;
+  private readonly onGlitch: (info: GlitchInfo) => void;
+  private readonly canvas: OffscreenCanvas;
+  private readonly ctx: OffscreenCanvasRenderingContext2D;
+  private frames: Frame[] = []; // последние 3
+  count = 0;
+  checked = 0;
+  saved = 0;
+  private running = false;
+  private handle = 0;
+
+  constructor(video: HTMLVideoElement, onGlitch: (info: GlitchInfo) => void) {
+    this.video = video;
+    this.onGlitch = onGlitch;
+    this.canvas = new OffscreenCanvas(W, H);
+    this.ctx = this.canvas.getContext('2d', { willReadFrequently: true })!;
+  }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    const tick = async (_now: DOMHighResTimeStamp, meta: VideoFrameCallbackMetadata) => {
+      if (!this.running) return;
+      try {
+        await this.onFrame(meta);
+      } catch {
+        // кадр уже недоступен (поток сменился) — пропускаем
+      }
+      if (this.running) this.handle = this.video.requestVideoFrameCallback(tick);
+    };
+    this.handle = this.video.requestVideoFrameCallback(tick);
+  }
+
+  stop(): void {
+    this.running = false;
+    if (this.handle) this.video.cancelVideoFrameCallback(this.handle);
+    for (const f of this.frames) f.bitmap?.close();
+    this.frames = [];
+  }
+
+  private async onFrame(meta: VideoFrameCallbackMetadata | undefined): Promise<void> {
+    const v = this.video;
+    if (!v.videoWidth) return;
+    this.ctx.drawImage(v, 0, 0, W, H);
+    const rgba = this.ctx.getImageData(0, 0, W, H).data;
+    const luma = new Uint8Array(W * H);
+    for (let i = 0, j = 0; j < luma.length; i += 4, j++) luma[j] = (rgba[i] * 77 + rgba[i + 1] * 150 + rgba[i + 2] * 29) >> 8;
+    const bitmap = await createImageBitmap(v, { resizeWidth: 480, resizeHeight: Math.round((480 * v.videoHeight) / v.videoWidth) });
+    this.frames.push({ luma, bitmap, time: meta?.mediaTime ?? 0, w: v.videoWidth, h: v.videoHeight });
+    if (this.frames.length > 3) this.frames.shift()!.bitmap.close();
+    if (this.frames.length === 3) this.check();
+  }
+
+  check(): void {
+    const [a, b, c] = this.frames;
+    this.checked++;
+    if (a.w !== b.w || b.w !== c.w || a.h !== b.h || b.h !== c.h) return; // смена размера — не глюк
+    const ab = diff(a.luma, b.luma);
+    const bc = diff(b.luma, c.luma);
+    const ac = diff(a.luma, c.luma);
+    if (ab < THRESHOLD || bc < THRESHOLD || ac > SIMILAR * Math.min(ab, bc)) return;
+    if (isFlash(a.luma, b.luma, c.luma)) return; // вспышка в кадре (взрыв, молния, выстрел), не глюк
+    this.count++;
+    const info: GlitchInfo = { at: new Date().toISOString(), size: `${b.w}×${b.h}`, diffPrev: ab.toFixed(1), diffNext: bc.toFixed(1), diffNeighbours: ac.toFixed(1) };
+    if (this.saved < MAX_SAVED) {
+      this.saved++;
+      info.image = strip([a.bitmap, b.bitmap, c.bitmap]);
+    }
+    this.onGlitch(info);
+  }
+}
+
+/**
+ * Вспышка (взрыв, молния, выстрел): кадр ярче обоих соседей, и свет только добавлен — почти ни один
+ * пиксель не стал темнее соседних кадров. Или кадр залит светом целиком. Глюк — сдвиг, копии, пятна,
+ * «кадр без яркости» — всегда где-то темнит картинку, такие отметки остаются.
+ */
+function isFlash(a: Uint8Array, b: Uint8Array, c: Uint8Array): boolean {
+  const mean = (x: Uint8Array) => x.reduce((s, v) => s + v, 0) / x.length;
+  const mb = mean(b);
+  if (mb < Math.max(mean(a), mean(c)) + FLASH_BRIGHTER) return false;
+  let darker = 0;
+  let sq = 0;
+  for (let i = 0; i < b.length; i++) {
+    if (b[i] < Math.min(a[i], c[i]) - DARKER_BY) darker++;
+    sq += (b[i] - mb) ** 2;
+  }
+  if (Math.sqrt(sq / b.length) < FLAT_STD) return true; // засвечен целиком
+  return darker / b.length < DARKER_SHARE;
+}
+
+function diff(x: Uint8Array, y: Uint8Array): number {
+  let sum = 0;
+  for (let i = 0; i < x.length; i++) sum += Math.abs(x[i] - y[i]);
+  return sum / x.length;
+}
+
+/** Три кадра в ряд (предыдущий, выброс, следующий) — data:image/png */
+function strip(bitmaps: ImageBitmap[]): string {
+  const w = bitmaps[0].width;
+  const h = bitmaps[0].height;
+  const canvas = document.createElement('canvas');
+  canvas.width = w * 3 + 8;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#f00';
+  ctx.fillRect(0, 0, canvas.width, h);
+  bitmaps.forEach((bmp, i) => ctx.drawImage(bmp, i * (w + 4), 0));
+  return canvas.toDataURL('image/png');
+}

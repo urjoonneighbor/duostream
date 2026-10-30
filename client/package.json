@@ -4,20 +4,27 @@
   "version": "1.1.0",
   "private": true,
   "description": "P2P-стрим экрана и голосовой чат на двоих: WebRTC, AV1/NVENC, шумодав на ONNX Runtime",
-  "main": "src/main/main.js",
+  "main": "app/main/main.js",
   "scripts": {
-    "postinstall": "node scripts/copy-ort.mjs && node scripts/build-native.mjs --optional",
+    "postinstall": "node scripts/copy-ort.mts && node scripts/build-native.mts --optional",
+    "build": "node -e \"require('fs').rmSync('app',{recursive:true,force:true})\" && tsc -p tsconfig.main.json && tsc -p tsconfig.renderer.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.worklet.json && npm --prefix ../server run build",
+    "typecheck": "tsc -p tsconfig.main.json --noEmit && tsc -p tsconfig.renderer.json --noEmit && tsc -p tsconfig.worker.json --noEmit && tsc -p tsconfig.worklet.json --noEmit && tsc -p tsconfig.scripts.json",
+    "prestart": "npm run build",
     "start": "electron .",
+    "prestart:viewer": "npm run build",
     "start:viewer": "electron . --profile=viewer",
-    "build:native": "node scripts/build-native.mjs",
-    "fetch-models": "node scripts/fetch-models.mjs",
-    "test:denoiser": "node scripts/test-denoiser.mjs",
+    "build:native": "node scripts/build-native.mts",
+    "fetch-models": "node scripts/fetch-models.mts",
+    "test:denoiser": "node scripts/test-denoiser.mts",
     "dist": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dist.ps1"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
     "electron": "^44.9.3",
     "electron-builder": "^26.15.3",
-    "onnxruntime-web": "^1.30.0"
+    "onnxruntime-web": "^1.30.0",
+    "typescript": "^7.0.2"
   },
   "allowScripts": {
     "electron": true
@@ -31,11 +38,14 @@
     "electronDist": "node_modules/electron/dist",
     "npmRebuild": false,
     "files": [
-      "src/**/*",
+      "app/**/*",
+      "src/renderer/**/*",
+      "!src/renderer/**/*.ts",
+      "!src/renderer/**/*.d.mts",
       "config/stream.config.default.json",
       "package.json",
       {
-        "from": "../server/src",
+        "from": "../server/dist",
         "to": "server",
         "filter": [
           "*.js"
