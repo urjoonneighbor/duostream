@@ -63,7 +63,7 @@
     "upnp": true
   },
   "playback": {
-    "jitterBufferTargetMs": 0
+    "streamBufferMs": 120
   },
   "app": {
     "autoUpdate": true,

@@ -1,0 +1,11 @@
+{
+  // Интерфейс: браузер (DOM), ES-модули — загружаются как есть, без сборщика
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "types": []
+  },
+  "include": ["src/renderer/js/**/*.ts", "src/shared/**/*.d.ts"]
+}

@@ -4,15 +4,23 @@
   "private": true,
   "description": "Минимальный WebSocket-сервер сигнализации DuoStream: только SDP и ICE, медиа через него не идёт",
   "type": "module",
-  "main": "src/server.js",
+  "main": "dist/server.js",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18"
   },
   "scripts": {
-    "start": "node src/server.js",
-    "test": "node --test \"test/*.test.js\""
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "prestart": "npm run build",
+    "start": "node dist/server.js",
+    "test": "tsc -p tsconfig.test.json && node --test \"test/*.test.ts\""
   },
   "dependencies": {
     "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "typescript": "^7.0.2"
   }
 }

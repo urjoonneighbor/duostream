@@ -1,6 +1,6 @@
 # Деплой DuoStream: каждый пуш в master собирает установщик и portable-версию и публикует их
 # в GitHub Releases с тегом v<major>.<minor>.<номер запуска> (major.minor — из client/package.json).
-# Установленные копии приложения сами находят новую версию и ставят её при выходе (client/src/main/updater.js).
+# Установленные копии приложения сами находят новую версию и ставят её при выходе (client/src/main/updater.ts).
 # Запустить вручную: Actions → Release → Run workflow.
 name: Release
 
@@ -49,12 +49,16 @@ jobs:
         working-directory: client
         run: npm ci
 
+      - name: Проверка типов TypeScript
+        working-directory: client
+        run: npm run typecheck
+
       - name: Проверка шумодава (DeepFilterNet3 и DTLN)
         working-directory: client
         run: |
-          node scripts/test-denoiser.mjs --model=dfn3
+          node scripts/test-denoiser.mts --model=dfn3
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          node scripts/test-denoiser.mjs --model=dtln
+          node scripts/test-denoiser.mts --model=dtln
 
       - name: Сборка
         working-directory: client
@@ -86,7 +90,7 @@ jobs:
           Write-Host $notes
 
       # Один вызов gh: создаёт релиз черновиком, загружает файлы и публикует — тег v<версия> ставится
-      # на собранный коммит. latest.yml нужен автообновлению (client/src/main/updater.js).
+      # на собранный коммит. latest.yml нужен автообновлению (client/src/main/updater.ts).
       - name: Публикация релиза
         working-directory: client/dist
         env:

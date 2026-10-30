@@ -1,0 +1,15 @@
+{
+  // Главный процесс Electron и preload: Node + Electron. package.json без "type" — значит, CommonJS;
+  // nodenext оставляет import() настоящим (встроенный сервер — ES-модуль)
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "esModuleInterop": true,
+    // import/export в CommonJS-файлах tsc переводит в require — Node этот код напрямую не запускает
+    "verbatimModuleSyntax": false,
+    "lib": ["es2023"],
+    "types": ["node"]
+  },
+  "include": ["src/main/**/*.ts", "src/preload/**/*.ts", "src/shared/**/*.d.ts"]
+}

@@ -1,0 +1,11 @@
+{
+  // Шумодав: Web Worker и ядра моделей (dfn-core, vad-core, dtln-core — их же запускает scripts/test-denoiser.ts)
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2023", "webworker"],
+    "types": []
+  },
+  "include": ["src/renderer/audio/denoise-worker.ts", "src/renderer/audio/*-core.ts"]
+}

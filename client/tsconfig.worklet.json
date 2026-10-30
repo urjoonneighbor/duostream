@@ -1,0 +1,12 @@
+{
+  // AudioWorklet: своя глобальная область (sampleRate, registerProcessor) — описана в src/shared/audio-worklet.d.ts;
+  // MessagePort и MessageEvent — из типов Web Worker
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "lib": ["es2023", "webworker"],
+    "types": []
+  },
+  "include": ["src/renderer/audio/*-worklet.ts", "src/shared/audio-worklet.d.ts"]
+}

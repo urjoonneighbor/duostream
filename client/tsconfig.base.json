@@ -1,0 +1,21 @@
+{
+  // Общие настройки TypeScript. Пишем только «стираемый» TypeScript (erasableSyntaxOnly): без enum,
+  // namespace и параметров-свойств — такой код Node 24 запускает напрямую (скрипты, тесты), а tsc
+  // превращает в обычный JS. Импорты — с расширением .ts, в собранном JS они становятся .js.
+  "compilerOptions": {
+    "target": "es2023",
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "rewriteRelativeImportExtensions": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmitOnError": true,
+    "rootDir": "src",
+    "outDir": "app",
+    "newLine": "lf"
+  }
+}

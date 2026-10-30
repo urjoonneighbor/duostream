@@ -1,5 +1,5 @@
 ﻿# Сборка установщика и portable-версии DuoStream: npm run dist
-#  1. собирает собственный захват (нужен .NET SDK 10);
+#  1. собирает TypeScript (npm run build → app/ и ../server/dist) и собственный захват (нужен .NET SDK 10);
 #  2. ставит Electron, если он ещё не скачан (scripts/ensure-electron.ps1);
 #  3. скачивает инструменты electron-builder (7-Zip, NSIS) через PowerShell с проверкой SHA-256 —
 #     загрузка из Node с GitHub на некоторых сетях обрывается (RequestError) — и кладёт их в build-tools/;
@@ -33,7 +33,9 @@ function Get-Tool($asset, $sevenZip) {
 }
 
 Set-Location $root
-node scripts/build-native.mjs
+npm run build
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
+node scripts/build-native.mts
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & (Join-Path $PSScriptRoot 'ensure-electron.ps1') -Root $root
 
