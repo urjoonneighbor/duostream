@@ -17,10 +17,13 @@
         <span class="dot"></span><span id="statusText">Не подключено</span>
       </div>
       <div class="spacer"></div>
-      <span class="peer" id="peerName"></span>
-      <span class="peer-state" id="peerMicOff" title="У собеседника выключен микрофон" hidden><i data-icon="micOff"></i></span>
-      <span class="peer-state" id="peerDeafened" title="У собеседника выключен звук — он вас не слышит" hidden><i data-icon="headphonesOff"></i></span>
-      <button class="icon-btn" id="btnSettings" title="Настройки" data-icon="sliders"></button>
+      <div class="peer-chip" id="peerChip" hidden>
+        <span class="peer" id="peerName"></span>
+        <span class="peer-state" id="peerMicOff" title="У собеседника выключен микрофон" hidden><i data-icon="micOff"></i></span>
+        <span class="peer-state" id="peerDeafened" title="У собеседника выключен звук — он вас не слышит" hidden><i data-icon="headphonesOff"></i></span>
+      </div>
+      <button class="ghost" id="btnDisconnect" title="Отключиться от собеседника" hidden><i data-icon="leave"></i><span>Отключиться</span></button>
+      <button class="icon-btn" id="btnSettings" title="Настройки" data-icon="settings"></button>
     </header>
 
     <main class="stage" id="stage">
@@ -95,37 +98,94 @@
     </main>
 
     <footer class="controls">
-      <div class="group">
-        <button class="primary" id="btnStream" hidden><i data-icon="screen"></i><span>Начать стрим</span></button>
-        <button id="btnDisconnect" hidden><i data-icon="leave"></i><span>Отключиться</span></button>
-      </div>
+      <!-- Слева — свой голос и звук собеседника -->
       <div class="group">
         <button class="toggle" id="btnMic" title="Микрофон (Ctrl+M)" disabled>
           <i data-icon="mic"></i>
           <span class="meter"><i id="micLevel"></i></span>
         </button>
-        <button class="toggle" id="btnDeafen" title="Звук собеседника">
+        <button class="toggle icon-btn" id="btnDeafen" title="Звук собеседника">
           <i data-icon="headphones"></i>
         </button>
-        <button class="toggle" id="btnDenoise" title="Шумоподавление (DeepFilterNet3 / DTLN, ONNX Runtime)" disabled>
-          <i data-icon="wave"></i><span id="denoiseText">Шумодав</span>
+        <button class="toggle icon-btn" id="btnDenoise" title="Шумоподавление (DeepFilterNet3 / DTLN, ONNX Runtime)" disabled>
+          <i data-icon="wave"></i><span id="denoiseText" class="visually-hidden">Шумодав</span>
         </button>
-        <label class="volume" title="Громкость собеседника; индикатор — уровень его голоса, который до нас доходит">
-          <span>Голос</span><span class="meter"><i id="voiceLevel"></i></span>
-          <input type="range" id="voiceVolume" min="0" max="300" step="5" value="100" />
-        </label>
-        <label class="volume" id="streamVolumeWrap" title="Громкость звука трансляции" hidden>
-          <span>Стрим</span><input type="range" id="streamVolume" min="0" max="200" step="5" value="80" />
-        </label>
-        <label class="volume" id="streamSendWrap" title="Звук трансляции для зрителя" hidden>
-          <span>Стрим</span><input type="range" id="streamSendVolume" min="0" max="200" step="5" value="100" />
-        </label>
+        <div class="popover-anchor">
+          <button id="btnVolume" title="Громкость" aria-expanded="false">
+            <i data-icon="volume"></i>
+            <span class="meter" title="Уровень голоса собеседника, который до нас доходит"><i id="voiceLevel"></i></span>
+          </button>
+          <div class="popover" id="volumePanel" hidden>
+            <h3>Громкость</h3>
+            <label class="volume" title="Громкость собеседника">
+              <span>Голос собеседника</span>
+              <input type="range" id="voiceVolume" min="0" max="300" step="5" value="100" />
+            </label>
+            <label class="volume" id="streamVolumeWrap" title="Громкость звука трансляции" hidden>
+              <span>Звук трансляции</span>
+              <input type="range" id="streamVolume" min="0" max="200" step="5" value="80" />
+            </label>
+            <label class="volume" id="streamSendWrap" title="Звук трансляции для зрителя" hidden>
+              <span>Звук трансляции для зрителя</span>
+              <input type="range" id="streamSendVolume" min="0" max="200" step="5" value="100" />
+            </label>
+          </div>
+        </div>
       </div>
+
+      <!-- В центре — трансляция (у стримера) -->
+      <div class="group center">
+        <button id="btnSwitchSource" title="Выбрать другое окно или экран — трансляция не прерывается" hidden>
+          <i data-icon="swap"></i><span>Источник</span>
+        </button>
+        <div class="popover-anchor">
+          <button id="btnStreamQuality" title="Разрешение, частота кадров и битрейт — меняются без остановки трансляции" aria-expanded="false" hidden>
+            <i data-icon="sliders"></i><span id="streamQualityText">Качество</span>
+          </button>
+          <div class="popover center" id="streamQualityPanel" hidden>
+            <h3>Качество трансляции</h3>
+            <label class="field">
+              <span>Разрешение</span>
+              <select id="qResolution">
+                <option value="3840x2160">3840 × 2160 (4K)</option>
+                <option value="2560x1440">2560 × 1440 (QHD)</option>
+                <option value="1920x1080">1920 × 1080 (Full HD)</option>
+                <option value="1280x720">1280 × 720 (HD)</option>
+                <option value="0x0">Как у источника</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Частота кадров</span>
+              <select id="qFps">
+                <option value="120">120 FPS</option>
+                <option value="90">90 FPS</option>
+                <option value="60">60 FPS</option>
+                <option value="30">30 FPS</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Битрейт (максимум)</span>
+              <select id="qBitrate">
+                <option value="50000">50 Мбит/с</option>
+                <option value="30000">30 Мбит/с</option>
+                <option value="20000">20 Мбит/с</option>
+                <option value="12000">12 Мбит/с</option>
+                <option value="8000">8 Мбит/с</option>
+                <option value="4000">4 Мбит/с</option>
+              </select>
+            </label>
+            <p class="hint">Применяется сразу, трансляция не прерывается. Остальное — в настройках.</p>
+          </div>
+        </div>
+        <button class="primary" id="btnStream" hidden><i data-icon="screen"></i><span>Начать стрим</span></button>
+      </div>
+
+      <!-- Справа — чат, связь, вид -->
       <div class="group right">
         <button class="icon-btn chat-toggle" id="btnChat" title="Чат и файлы (можно перетащить файл в окно)" disabled>
           <i data-icon="chat"></i><span class="count" id="chatBadge" hidden></span>
         </button>
-        <button class="quality" id="btnQuality" data-quality="unknown" title="Подробная статистика">
+        <button class="quality" id="btnQuality" data-quality="unknown" title="Качество соединения — щелчок покажет подробности">
           <span class="bars"><i></i><i></i><i></i></span><span id="qualityText">Нет соединения</span>
         </button>
         <button class="icon-btn" id="btnMarkGlitch" title="Отметить глюк картинки (Ctrl + Shift + G): последние 2 с кадров сохранятся у обоих рядом с журналом" data-icon="flag" hidden></button>
@@ -349,6 +409,10 @@
           <label class="field">
             <span>Запас буфера трансляции у зрителя, мс (видео и звук; 0 — минимальная задержка, звук может трещать)</span>
             <input id="sJitter" type="number" min="0" max="2000" step="10" />
+          </label>
+          <label class="field">
+            <span>Запас буфера голоса, мс (0 — без задержки, но речь хрипит, когда пакеты опаздывают)</span>
+            <input id="sVoiceBuffer" type="number" min="0" max="500" step="10" />
           </label>
           <p class="hint">Сетевые настройки применяются при следующем подключении.</p>
           <label class="check"><input type="checkbox" id="sAutoUpdate" /><span>Проверять обновления на GitHub (установленная версия обновляется при выходе, portable — сообщает о новой версии)</span></label>

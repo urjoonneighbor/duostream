@@ -68,6 +68,7 @@ export const DEFAULTS: Readonly<Config> = Object.freeze<Config>({
     // Без запаса звук трансляции трещит: пакеты звука застревают за пачками видео (1440p, десятки Мбит/с),
     // опаздывают, и приёмник их досочиняет. Голос не задерживается — разговор без лишней паузы.
     streamBufferMs: 120,
+    voiceBufferMs: 60,
   },
   app: {
     autoUpdate: true, // проверять обновления на GitHub (src/main/updater.ts)
@@ -228,6 +229,7 @@ export function sanitize(input: unknown): Config {
   if (playback.streamBufferMs === undefined && oldBuffer > 0) c.playback.streamBufferMs = oldBuffer;
   delete c.playback.jitterBufferTargetMs;
   c.playback.streamBufferMs = clampInt(c.playback.streamBufferMs, 0, 2000, d.playback.streamBufferMs);
+  c.playback.voiceBufferMs = clampInt(c.playback.voiceBufferMs, 0, 500, d.playback.voiceBufferMs);
   c.app.autoUpdate = bool(c.app.autoUpdate, d.app.autoUpdate);
   c.app.overlay = {
     enabled: bool(c.app.overlay.enabled, d.app.overlay.enabled),

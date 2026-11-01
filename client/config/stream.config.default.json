@@ -63,7 +63,8 @@
     "upnp": true
   },
   "playback": {
-    "streamBufferMs": 120
+    "streamBufferMs": 120,
+    "voiceBufferMs": 60
   },
   "app": {
     "autoUpdate": true,

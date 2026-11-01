@@ -18,6 +18,7 @@
 // stdin:
 //   "gen G"        — Electron перешёл на кольцо G, старые хэндлы в его процессе можно закрыть
 //   "free G i"     — Electron и WebRTC больше не используют текстуру i кольца G
+//   "fps N"        — новая предельная частота кадров (без перезапуска захвата)
 //   конец потока   — завершение работы
 using System.Collections.Concurrent;
 using System.Diagnostics;
@@ -42,9 +43,6 @@ struct Texture2DDesc { public uint Width, Height, MipLevels, ArraySize, Format, 
 [StructLayout(LayoutKind.Sequential)]
 struct Box { public uint Left, Top, Front, Right, Bottom, Back; }
 
-[StructLayout(LayoutKind.Sequential)]
-struct MonitorInfo { public int Size; public int Left, Top, Right, Bottom; public int WorkLeft, WorkTop, WorkRight, WorkBottom; public int Flags; }
-
 /// <summary>Кольцо общих текстур одного размера («поколение»).</summary>
 sealed class Ring
 {
@@ -62,8 +60,8 @@ static unsafe class Program
     [DllImport("dxgi.dll")] static extern int CreateDXGIFactory1(ref Guid riid, out IntPtr factory);
     [DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(long point, uint flags);
     [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
-    [DllImport("user32.dll")] static extern bool GetMonitorInfoW(IntPtr monitor, ref MonitorInfo info);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
     [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
     [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
@@ -94,6 +92,22 @@ static unsafe class Program
     static Ring lastRing;
     static int lastSlot = -1, lastW, lastH;
     static long lastEmit, lastTs;
+
+    // Текстуры кольца — ровно размера кадра: аппаратный кодировщик Chromium берёт текстуру целиком,
+    // не глядя на видимую часть, и сжимает её в размер кадра. В кольце «с запасом» после уменьшения окна
+    // (например, выхода из полноэкранного режима) снизу и справа оставались куски прежней картинки, разные
+    // в каждой текстуре, — зритель видел мелькание. При росте окна кольцо пересоздаётся сразу, при
+    // уменьшении — не чаще раза в RingShrinkMs (окно тянут мышью — не создавать текстуры на каждый кадр).
+    const int RingShrinkMs = 100;
+
+    // Целевой период кадров (тики): команда «fps N» меняет его на лету, без перезапуска захвата
+    static long framePeriod;
+    // Захватываемое окно (IntPtr.Zero — экран): пока оно свёрнуто, кадры WGC (крошечная заглушка) пропускаются,
+    // а зрителю повторяется последний нормальный кадр
+    static IntPtr watchedWindow;
+    static int ringSize;
+    static string ringAdapter = "";
+    static long ringCreatedAt;
 
     static void** VTable(IntPtr p) => *(void***)p;
     static void Check(int hr, string what) { if (hr < 0) throw new Exception($"{what}: 0x{hr:X8}"); }
@@ -167,6 +181,9 @@ static unsafe class Program
         {
             var hwnd = new IntPtr(long.Parse(hwndText, CultureInfo.InvariantCulture));
             if (!IsWindow(hwnd)) throw new Exception("окно не найдено");
+            // Свёрнутое окно Windows не рисует — кадров не будет, пока его не развернут
+            if (IsIconic(hwnd)) throw new Exception("окно свёрнуто — разверните его, чтобы транслировать");
+            watchedWindow = hwnd;
             monitor = MonitorFromWindow(hwnd, 2 /* NEAREST */);
             ptr = interop.CreateForWindow(hwnd, ref iid);
         }
@@ -215,6 +232,7 @@ static unsafe class Program
         r.Free = new ConcurrentQueue<int>(Enumerable.Range(0, count));
         if (ring != null) retired.Add(ring);
         ring = r;
+        ringCreatedAt = Stopwatch.GetTimestamp();
         var handles = string.Join(",", r.RemoteHandles.Select(h => $"\"{h}\""));
         Emit($"{{\"type\":\"ready\",\"gen\":{r.Gen},\"width\":{width},\"height\":{height},\"handles\":[{handles}],\"adapter\":\"{Esc(adapterName)}\"}}");
     }
@@ -240,6 +258,8 @@ static unsafe class Program
         Emit($"{{\"type\":\"frame\",\"gen\":{r.Gen},\"i\":{slot},\"ts\":{ts},\"w\":{w},\"h\":{h}}}");
         (lastRing, lastSlot, lastW, lastH, lastTs, lastEmit) = (r, slot, w, h, ts, Stopwatch.GetTimestamp());
     }
+
+    static bool RingShrinkDue() => Stopwatch.GetTimestamp() - ringCreatedAt >= Stopwatch.Frequency * RingShrinkMs / 1000;
 
     static long QpcMicroseconds() => (long)(Stopwatch.GetTimestamp() * (1_000_000.0 / Stopwatch.Frequency));
 
@@ -274,6 +294,18 @@ static unsafe class Program
                 lock (gpuLock)
                 {
                     var r = ring;
+                    // Окно уменьшилось и замерло, а кольцо осталось прежнего размера (новых кадров от WGC нет):
+                    // переносим последний кадр в кольцо точного размера
+                    if (lastRing == r && lastSlot >= 0 && (lastW != r.Width || lastH != r.Height) && RingShrinkDue())
+                    {
+                        var oldTexture = r.Textures[lastSlot]; // старое кольцо уходит в retired, текстуры живы до ответа gen
+                        CreateRing(lastW, lastH, ringSize, ringAdapter);
+                        var fresh = ring;
+                        if (!fresh.Free.TryDequeue(out int first)) continue;
+                        CopyAndWait(fresh.Textures[first], oldTexture, lastW, lastH);
+                        EmitFrame(fresh, first, QpcMicroseconds(), lastW, lastH);
+                        continue;
+                    }
                     if (lastRing != r || lastSlot < 0 || Stopwatch.GetTimestamp() - lastEmit < interval) continue;
                     if (!TryTakeOtherSlot(r, lastSlot, out int slot)) continue; // все текстуры заняты — повторим позже
                     CopyAndWait(r.Textures[slot], r.Textures[lastSlot], lastW, lastH);
@@ -293,7 +325,11 @@ static unsafe class Program
         while ((line = Console.In.ReadLine()) != null)
         {
             var p = line.Split(' ');
-            if (p.Length == 3 && p[0] == "free" && int.TryParse(p[1], out var gen) && int.TryParse(p[2], out var slot))
+            if (p.Length == 2 && p[0] == "fps" && double.TryParse(p[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var newFps) && newFps >= 1)
+            {
+                Interlocked.Exchange(ref framePeriod, (long)(TimeSpan.TicksPerSecond / newFps));
+            }
+            else if (p.Length == 3 && p[0] == "free" && int.TryParse(p[1], out var gen) && int.TryParse(p[2], out var slot))
             {
                 var r = ring;
                 if (r != null && r.Gen == gen) r.Free.Enqueue(slot);
@@ -318,6 +354,9 @@ static unsafe class Program
 
     static void Main(string[] args)
     {
+        // Сообщения (в том числе ошибки на русском) — в UTF-8: Electron читает stdout как UTF-8,
+        // а по умолчанию консоль .NET пишет в кодировке OEM (cp866) — получались кракозябры
+        Console.OutputEncoding = new System.Text.UTF8Encoding(false);
         var parsed = ParseArgs(args);
         if (parsed.ContainsKey("audio-window"))
         {
@@ -339,7 +378,7 @@ static unsafe class Program
         if (!GraphicsCaptureSession.IsSupported()) throw new Exception("Windows Graphics Capture не поддерживается этой версией Windows");
         int parentPid = int.Parse(a["parent"], CultureInfo.InvariantCulture);
         double fps = double.Parse(a.GetValueOrDefault("fps", "120"), CultureInfo.InvariantCulture);
-        int ringSize = int.Parse(a.GetValueOrDefault("ring", "8"), CultureInfo.InvariantCulture);
+        ringSize = int.Parse(a.GetValueOrDefault("ring", "8"), CultureInfo.InvariantCulture);
 
         parentProcess = OpenProcess(0x0040 /* PROCESS_DUP_HANDLE */, false, parentPid);
         if (parentProcess == IntPtr.Zero) throw new Exception($"нет доступа к процессу {parentPid}");
@@ -361,7 +400,7 @@ static unsafe class Program
 
         try { GraphicsCaptureAccess.RequestAccessAsync(GraphicsCaptureAccessKind.Borderless).AsTask().Wait(2000); } catch { }
 
-        var item = CreateItem(a, out var monitor);
+        var item = CreateItem(a, out _);
         item.Closed += (_, _) =>
         {
             Emit("{\"type\":\"closed\"}");
@@ -379,12 +418,9 @@ static unsafe class Program
             }) { IsBackground = true }.Start();
         }
 
-        // Кольцо с запасом: окно может вырасти до размера монитора без пересоздания текстур
-        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
-        GetMonitorInfoW(monitor, ref info);
-        int capW = Math.Max(item.Size.Width, info.Right - info.Left) & ~1;
-        int capH = Math.Max(item.Size.Height, info.Bottom - info.Top) & ~1;
-        lock (gpuLock) CreateRing(capW, capH, ringSize, adapterName);
+        // Кольцо под размер источника (с тем же округлением до 8, что у кадров ниже)
+        ringAdapter = adapterName;
+        lock (gpuLock) CreateRing(Math.Max(item.Size.Width & ~7, 8), Math.Max(item.Size.Height & ~7, 8), ringSize, adapterName);
         new Thread(ReadCommands) { IsBackground = true }.Start();
 
         var poolSize = item.Size;
@@ -394,7 +430,7 @@ static unsafe class Program
         // Главное отличие от захвата Chromium: без этого Windows 11 24H2+ отдаёт кадр не чаще раза в 16 мс
         try { session.MinUpdateInterval = TimeSpan.FromMilliseconds(1); } catch { }
 
-        long period = (long)(TimeSpan.TicksPerSecond / fps);
+        framePeriod = (long)(TimeSpan.TicksPerSecond / fps);
         long tolerance = TimeSpan.TicksPerMillisecond * 3;
         long nextDue = 0, sent = 0, dropped = 0, copyTicks = 0;
         var statsClock = Stopwatch.StartNew();
@@ -407,6 +443,7 @@ static unsafe class Program
             {
                 using var frame = sender.TryGetNextFrame();
                 if (frame == null) return;
+                if (watchedWindow != IntPtr.Zero && IsIconic(watchedWindow)) return;
                 var content = frame.ContentSize;
                 if (content.Width != poolSize.Width || content.Height != poolSize.Height)
                 {
@@ -417,7 +454,7 @@ static unsafe class Program
 
                 long t = frame.SystemRelativeTime.Ticks;
                 if (t + tolerance < nextDue) return; // выдерживаем целевую частоту кадров
-                nextDue = Math.Max(nextDue + period, t);
+                nextDue = Math.Max(nextDue + Interlocked.Read(ref framePeriod), t);
 
                 var surface = frame.Surface.Description;
                 // Ширина и высота кратны 8 (обрезаем до 7 пикселей справа и снизу). Окно бывает любого размера,
@@ -430,7 +467,8 @@ static unsafe class Program
 
                 lock (gpuLock)
                 {
-                    if (w > ring.Width || h > ring.Height) CreateRing(Math.Max(w, ring.Width), Math.Max(h, ring.Height), ringSize, adapterName);
+                    if (w > ring.Width || h > ring.Height || ((w != ring.Width || h != ring.Height) && RingShrinkDue()))
+                        CreateRing(w, h, ringSize, adapterName);
                     var r = ring;
                     if (!r.Free.TryDequeue(out var slot))
                     {

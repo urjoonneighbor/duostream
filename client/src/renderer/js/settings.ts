@@ -4,7 +4,7 @@ import { playTestTone } from './tones.ts';
 import type { Config, HotkeyAction, HotkeyBinding } from '../../shared/config';
 import type { Row } from './stats.ts';
 
-function setSelect(select: HTMLSelectElement, value: string, customLabel?: string): void {
+export function setSelect(select: HTMLSelectElement, value: string, customLabel?: string): void {
   if (![...select.options].some((o) => o.value === value)) {
     select.append(new Option(customLabel ?? value, value));
   }
@@ -150,6 +150,7 @@ export class SettingsDialog {
     $<HTMLInputElement>('#sTurnPass').value = n.turn.credential;
     $<HTMLInputElement>('#sForceRelay').checked = n.forceRelay;
     $<HTMLInputElement>('#sJitter').value = String(p.streamBufferMs);
+    $<HTMLInputElement>('#sVoiceBuffer').value = String(p.voiceBufferMs);
     $<HTMLInputElement>('#sAutoUpdate').checked = this.cfg.app.autoUpdate;
     $<HTMLInputElement>('#sOverlay').checked = this.cfg.app.overlay.enabled;
     setSelect($<HTMLSelectElement>('#sOverlayCorner'), this.cfg.app.overlay.corner);
@@ -323,6 +324,7 @@ export class SettingsDialog {
     };
     cfg.network.forceRelay = $<HTMLInputElement>('#sForceRelay').checked;
     cfg.playback.streamBufferMs = num('#sJitter');
+    cfg.playback.voiceBufferMs = num('#sVoiceBuffer');
     cfg.app.autoUpdate = $<HTMLInputElement>('#sAutoUpdate').checked;
     cfg.app.overlay = { enabled: $<HTMLInputElement>('#sOverlay').checked, corner: $<HTMLInputElement>('#sOverlayCorner').value as Config['app']['overlay']['corner'] };
     return cfg;

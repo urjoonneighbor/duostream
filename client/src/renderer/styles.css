@@ -50,6 +50,7 @@ button {
   align-items: center;
   gap: 8px;
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.15s, border-color 0.15s;
 }
 button:hover:not(:disabled) {
@@ -123,11 +124,22 @@ textarea {
   font-size: 12px;
 }
 
+/* Текст только для подсказок экранного диктора: на экране его нет */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* ---------- верхняя панель ---------- */
 .topbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  min-width: 0;
   padding: 10px 16px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
@@ -168,6 +180,30 @@ textarea {
 }
 .peer {
   color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.peer-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+}
+.status {
+  min-width: 0;
+}
+.status span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topbar button.ghost {
+  color: var(--muted);
 }
 .spacer {
   flex: 1;
@@ -205,7 +241,9 @@ textarea {
   pointer-events: auto;
 }
 .overlay.dim {
-  background: rgba(13, 15, 19, 0.92);
+  /* Непрозрачный: видео под заставкой всё равно скрыто, а сквозь полупрозрачный фон на некоторых
+     видеокартах просвечивал последний кадр трансляции, который не перерисовался («призрак») */
+  background: var(--bg);
 }
 .badge {
   position: absolute;
@@ -542,11 +580,15 @@ dd {
   user-select: text;
 }
 
-/* ---------- нижняя панель ---------- */
+/* ---------- нижняя панель ----------
+   Три зоны: слева голос, в центре трансляция (у стримера), справа чат, связь и вид. Центр — по центру
+   окна, сколько бы кнопок ни было по краям. */
 .controls {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 18px;
+  gap: 12px;
+  min-width: 0;
   padding: 10px 16px;
   border-top: 1px solid var(--line);
   background: var(--panel);
@@ -585,8 +627,35 @@ body.fs.idle * {
   align-items: center;
   gap: 8px;
 }
+.group.center {
+  justify-content: center;
+}
+/* Узкое окно: у кнопок трансляции и индикатора связи остаются иконки (текст — в подсказках) */
+@media (max-width: 1100px) {
+  .controls {
+    gap: 8px;
+  }
+  .group {
+    gap: 6px;
+  }
+  .group.center button > span,
+  #btnDisconnect > span {
+    display: none;
+  }
+  .group.center button,
+  #btnDisconnect {
+    padding: 8px;
+  }
+}
+@media (max-width: 760px) {
+  #qualityText,
+  #btnVolume .meter,
+  .brand {
+    display: none;
+  }
+}
 .group.right {
-  margin-left: auto;
+  justify-content: flex-end;
 }
 .toggle[aria-pressed='false'] {
   color: var(--poor);
@@ -615,16 +684,18 @@ body.fs.idle * {
   transform: scaleX(0);
 }
 .volume {
-  display: flex;
-  align-items: center;
+  display: grid;
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
 }
 .volume input {
-  width: 90px;
+  width: 100%;
   padding: 0;
   accent-color: var(--accent);
+}
+#btnVolume .meter {
+  width: 28px;
 }
 .quality {
   font-variant-numeric: tabular-nums;
@@ -657,6 +728,39 @@ body.fs.idle * {
 }
 .quality[data-quality='poor'] .bars i:nth-child(1) {
   background: var(--poor);
+}
+
+/* ---------- быстрые настройки трансляции ---------- */
+.popover-anchor {
+  position: relative;
+  display: flex;
+}
+.popover {
+  position: absolute;
+  bottom: calc(100% + 12px);
+  left: 0;
+  z-index: 20;
+  display: grid;
+  gap: 12px;
+  width: 260px;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.55);
+}
+.popover.center {
+  left: 50%;
+  transform: translateX(-50%);
+}
+.popover h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.popover .hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 /* ---------- диалоги ---------- */
@@ -832,7 +936,7 @@ legend {
 .toasts {
   position: fixed;
   right: 16px;
-  bottom: 72px;
+  bottom: 76px; /* над нижней панелью, а не поверх её кнопок */
   display: grid;
   gap: 8px;
   z-index: 10;

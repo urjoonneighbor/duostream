@@ -40,7 +40,12 @@ function handleBuffer(value: string): Buffer {
 }
 
 export class NativeCapture {
-  private proc: ReturnType<typeof spawn> | null = null;
+  /**
+   * Процессы захвата по сессиям. Обычно он один; при смене источника новый запускается рядом со старым,
+   * и старый останавливается только после первого кадра нового. Не открылся новый (окно свёрнуто,
+   * закрыто) — трансляция продолжается со старого, а не остаётся без картинки.
+   */
+  private readonly procs = new Map<number, ReturnType<typeof spawn>>();
   private sessionId = 0;
   private gpu: { vendorId: number; deviceId: number; name: string } | null = null;
 
@@ -97,7 +102,6 @@ export class NativeCapture {
     webContents: WebContents;
     onEvent: (e: NativeCaptureEvent) => void;
   }): Promise<{ session: number; width: number; height: number; adapter: string }> {
-    this.stop();
     const status = this.status();
     if (!status.available) throw new Error(status.reason);
 
@@ -107,7 +111,8 @@ export class NativeCapture {
 
     const session = ++this.sessionId;
     const proc = spawn(status.path, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
-    this.proc = proc;
+    this.procs.set(session, proc);
+    const alive = () => this.procs.get(session) === proc;
     const write = (line: string) => {
       if (proc.stdin.writable) proc.stdin.write(`${line}\n`);
     };
@@ -124,7 +129,7 @@ export class NativeCapture {
 
       const finish = (error: Error) => {
         clearTimeout(timer);
-        if (this.proc === proc) this.stop();
+        if (alive()) this.stop(session);
         if (!started) reject(error);
         else onEvent({ session, type: 'error', message: error.message });
       };
@@ -132,13 +137,13 @@ export class NativeCapture {
 
       proc.on('error', (err) => finish(new Error(`не удалось запустить захват: ${err.message}`)));
       proc.on('exit', (code) => {
-        // Штатная остановка (stop()) сначала обнуляет this.proc — тогда это не ошибка
-        if (this.proc === proc) finish(new Error(`процесс захвата завершился (код ${code})`));
+        // Штатная остановка (stop()) сначала убирает процесс из procs — тогда это не ошибка
+        if (alive()) finish(new Error(`процесс захвата завершился (код ${code})`));
       });
       proc.stderr.on('data', (d: Buffer) => console.warn(`[native-capture] ${String(d).trim()}`));
 
       readline.createInterface({ input: proc.stdout }).on('line', (line) => {
-        if (this.proc !== proc) return;
+        if (!alive()) return;
         let msg: HelperMessage;
         try {
           msg = JSON.parse(line) as HelperMessage;
@@ -179,7 +184,9 @@ export class NativeCapture {
             }
             const sentAt = performance.now();
             sharedTexture
-              .sendSharedTexture({ frame: webContents.mainFrame, importedSharedTexture: texture }, session)
+              // Размер кадра — отдельно: Chromium кэширует импорт по хэндлу текстуры, и у слота кольца,
+              // импортированного раньше при другом размере окна, visibleRect остаётся старым
+              .sendSharedTexture({ frame: webContents.mainFrame, importedSharedTexture: texture }, session, frame.w, frame.h)
               .then(() => {
                 sendErrors = 0;
                 const ms = performance.now() - sentAt;
@@ -197,6 +204,8 @@ export class NativeCapture {
               started = true;
               lastSize = size;
               clearTimeout(timer);
+              // Новый захват работает — прежние больше не нужны
+              for (const other of [...this.procs.keys()]) if (other !== session) this.stop(other);
               resolve({ session, width: frame.w, height: frame.h, adapter });
             } else if (size !== lastSize) {
               lastSize = size;
@@ -219,7 +228,7 @@ export class NativeCapture {
             break;
           case 'closed':
             clearTimeout(timer);
-            this.stop();
+            this.stop(session);
             if (started) onEvent({ session, type: 'closed' });
             else reject(new Error('источник закрыт'));
             break;
@@ -233,11 +242,22 @@ export class NativeCapture {
     });
   }
 
-  /** @param session остановить, только если это всё ещё текущий захват */
+  /** Новая предельная частота кадров захвата — без перезапуска */
+  setFps(session: number, fps: number): boolean {
+    const proc = this.procs.get(session);
+    if (!proc?.stdin?.writable) return false;
+    proc.stdin.write(`fps ${fps}\n`);
+    return true;
+  }
+
+  /** @param session какой захват остановить; без него — все */
   stop(session?: number): void {
-    if (session !== undefined && session !== this.sessionId) return;
-    const proc = this.proc;
-    this.proc = null;
+    if (session === undefined) {
+      for (const s of [...this.procs.keys()]) this.stop(s);
+      return;
+    }
+    const proc = this.procs.get(session);
+    this.procs.delete(session);
     if (!proc) return;
     // Конец stdin — процесс закроет свои хэндлы в нашем процессе и выйдет сам
     try {

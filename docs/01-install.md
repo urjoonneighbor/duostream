@@ -31,9 +31,12 @@
 | Windows 10/11 x64 | 10 21H2+ / 11 | Захват экрана и звука, Media Foundation |
 | [Node.js](https://nodejs.org/) LTS | 20 или новее (проверено на 24) | Сервер, сборка и запуск клиента |
 | Драйвер NVIDIA | актуальный Game Ready или Studio | NVENC AV1 (RTX 40xx и новее), декодирование |
-| [.NET SDK](https://dotnet.microsoft.com/download/dotnet/10.0) | 10 (только у стримера, только для сборки) | Собственный захват 120 FPS (`duostream-capture.exe`) |
+| [.NET SDK](https://dotnet.microsoft.com/download/dotnet/10.0) | 10 (только для сборки; ставить не обязательно) | Собственный захват 120 FPS (`duostream-capture.exe`) |
 
-Без .NET SDK приложение работает, но захват экрана идёт через Chromium — до ~60 FPS на Windows 11 24H2+.
+.NET SDK устанавливать не нужно: если его нет, сборка сама скачивает официальный zip SDK 10 (~300 МБ,
+с builds.dotnet.microsoft.com, SHA-512 сверяется с метаданными релиза) в `client/build-tools/dotnet` —
+без установки в систему и прав администратора. Если скачать не удалось, приложение всё равно работает,
+но захват экрана идёт через Chromium — до ~60 FPS на Windows 11 24H2+.
 Собранному приложению (`npm run dist`) .NET не нужен: exe захвата самодостаточный.
 
 При установке Node.js оставьте галочку «Add to PATH». Проверка в PowerShell:
@@ -96,10 +99,10 @@ cd client
 npm install
 ```
 
-`npm install` скачивает Electron (~110 МБ), копирует ONNX Runtime в `src/renderer/vendor/ort` и, если
-установлен .NET SDK 10, собирает собственный захват в `native/bin/duostream-capture.exe` (первый раз
-~1 минута: .NET скачивает свои пакеты). Без .NET SDK будет предупреждение, установка не прервётся.
-Собрать захват отдельно (например, после установки .NET SDK):
+`npm install` скачивает Electron (~110 МБ), копирует ONNX Runtime в `src/renderer/vendor/ort` и собирает
+собственный захват в `native/bin/duostream-capture.exe` (первый раз несколько минут: при необходимости
+скачивается .NET SDK 10, затем пакеты .NET). Если собрать захват не удалось, будет предупреждение,
+установка не прервётся. Собрать захват отдельно:
 
 ```powershell
 npm run build:native
@@ -204,7 +207,7 @@ npm run test:denoiser
 npm run dist
 ```
 
-Скрипт `scripts/dist.ps1` собирает TypeScript (`npm run build`), захват 120 FPS (нужен .NET SDK 10), скачивает Electron, если
+Скрипт `scripts/dist.ps1` собирает TypeScript (`npm run build`), захват 120 FPS (.NET SDK 10 скачивается сам, если его нет), скачивает Electron, если
 его ещё нет (`npm start` можно не запускать), и инструменты упаковки (7-Zip и NSIS) — через PowerShell
 с проверкой SHA-256 (из Node загрузки с GitHub на некоторых сетях обрываются) — и запускает
 electron-builder. Результат в `client/dist`:
