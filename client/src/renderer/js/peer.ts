@@ -252,6 +252,7 @@ export class PeerSession extends Emitter<PeerEvents> {
     this.remoteDescriptionSet = true;
     await this.flushCandidates();
     await this.applySenderParams();
+    this.tuneReceivers(); // голос зрителя стример тоже принимает с запасом
     if (this.renegotiate) {
       const next = this.renegotiate;
       this.renegotiate = null;
@@ -347,14 +348,19 @@ export class PeerSession extends Emitter<PeerEvents> {
 
   /**
    * Запас буфера трансляции (playback.streamBufferMs): видео и звуку трансляции одинаковый, иначе звук
-   * разойдётся с картинкой (дорожки не синхронизированы). Голос — без запаса, чтобы разговор не запаздывал.
+   * разойдётся с картинкой (дорожки не синхронизированы). Голосу — свой небольшой запас
+   * (playback.voiceBufferMs): голос стримера идёт тем же соединением, что и видео, и его пакеты опаздывают
+   * за пачками видео (ключевой кадр, скачок битрейта). Без запаса Opus досочиняет пропуски — речь хрипит.
    */
   private tuneReceivers(): void {
-    const target = this.cfg.playback.streamBufferMs ?? 0;
-    for (const t of [this.videoT, this.systemT]) {
+    const set = (t: RTCRtpTransceiver | null, ms: number) => {
       const receiver = t?.receiver;
-      if (receiver && 'jitterBufferTarget' in receiver) receiver.jitterBufferTarget = target || null;
-    }
+      if (receiver && 'jitterBufferTarget' in receiver) receiver.jitterBufferTarget = ms || null;
+    };
+    const stream = this.cfg.playback.streamBufferMs ?? 0;
+    set(this.videoT, stream);
+    set(this.systemT, stream);
+    set(this.voiceT, this.cfg.playback.voiceBufferMs ?? 0);
   }
 
   // ---------------- общее ----------------
@@ -378,6 +384,7 @@ export class PeerSession extends Emitter<PeerEvents> {
 
   updateConfig(cfg: Config): Promise<void> {
     this.cfg = cfg;
+    this.tuneReceivers(); // запасы буфера — сразу, без переподключения
     return this.applySenderParams();
   }
 

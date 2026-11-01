@@ -4,12 +4,15 @@ import type { DuoApi, ImportedTexture } from '../shared/duo-api';
 
 // Кадры собственного захвата (см. src/main/native-capture.ts). Получатель регистрируется сразу:
 // main не может отправить текстуру, пока его нет.
-let frameHandler: ((imported: ImportedTexture, session: number) => Promise<void> | void) | null = null;
+// Подписчиков может быть несколько: при смене источника старый и новый захват какое-то время работают
+// вместе, и каждый трек берёт кадры только своей сессии.
+type FrameHandler = (imported: ImportedTexture, session: number, width: number, height: number) => Promise<void> | void;
+const frameHandlers = new Set<FrameHandler>();
 if (typeof sharedTexture?.setSharedTextureReceiver === 'function') {
-  sharedTexture.setSharedTextureReceiver(async (data, session) => {
+  sharedTexture.setSharedTextureReceiver(async (data, session, width, height) => {
     const imported = data.importedSharedTexture;
     try {
-      if (frameHandler) await frameHandler(imported, Number(session));
+      await Promise.all([...frameHandlers].map((handler) => handler(imported, Number(session), Number(width), Number(height))));
     } finally {
       // Текстура вернётся процессу захвата, когда её отпустят и WebRTC, и мы
       imported.release();
@@ -83,8 +86,10 @@ const api: DuoApi = {
     status: () => ipcRenderer.invoke('native-capture:status'),
     start: (sourceId, fps) => ipcRenderer.invoke('native-capture:start', { sourceId, fps }),
     stop: (session) => ipcRenderer.invoke('native-capture:stop', session),
+    setFps: (session, fps) => ipcRenderer.invoke('native-capture:fps', session, fps),
     onFrame: (cb) => {
-      frameHandler = cb;
+      frameHandlers.add(cb);
+      return () => frameHandlers.delete(cb);
     },
     onEvent: (cb) => subscribe('native-capture:event', cb),
   },

@@ -13,7 +13,7 @@ import { FrameRecorder } from './frame-recorder.ts';
 import { Playback, SendGain } from './playback.ts';
 import { Chat } from './chat.ts';
 import { ChatPanel } from './chat-ui.ts';
-import { SettingsDialog } from './settings.ts';
+import { SettingsDialog, setSelect } from './settings.ts';
 import { $, toast, renderIcons, setIcon, renderList } from './ui.ts';
 import { playCue, type Cue } from './tones.ts';
 import type { CodecName, Config, HotkeyAction, Role } from '../../shared/config';
@@ -738,14 +738,85 @@ function captureConstraints(video: Config['video']): MediaTrackConstraints {
   return constraints;
 }
 
-async function startStream(): Promise<void> {
+/** Окно выбора источника с текущими параметрами трансляции */
+function chooseSource(): Promise<SourcePick | null> {
   const v = state.cfg.video;
   const resolution = v.width && v.height ? `${v.width}×${v.height}` : 'разрешение источника';
-  const pick = await openSourcePicker({
+  return openSourcePicker({
     captureAudio: state.cfg.audio.captureSystemAudio,
     info: `${resolution} · ${v.frameRate} FPS · до ${formatKbps(v.bitrateKbps)} · ${state.codecOrder[0] ?? v.codecs[0]}`,
   });
+}
+
+async function startStream(): Promise<void> {
+  const pick = await chooseSource();
   if (pick) await beginCapture(pick);
+}
+
+/**
+ * Другой источник во время трансляции: новый трек подменяет старый в том же соединении (replaceTrack),
+ * зритель не переподключается. Если новый источник не открылся, остаётся прежний.
+ */
+async function switchSource(): Promise<void> {
+  if (!state.screen) return;
+  const pick = await chooseSource();
+  if (pick && state.screen) await beginCapture(pick);
+}
+
+// ---------- быстрые настройки трансляции (кнопка «Качество») ----------
+
+function streamQualityLabel(v: Config['video']): string {
+  return `${v.height ? `${v.height}p` : 'Источник'} · ${v.frameRate} FPS`;
+}
+
+function fillStreamQuality(): void {
+  const v = state.cfg.video;
+  setSelect($<HTMLSelectElement>('#qResolution'), `${v.width}x${v.height}`, `${v.width} × ${v.height}`);
+  setSelect($<HTMLSelectElement>('#qFps'), String(v.frameRate), `${v.frameRate} FPS`);
+  setSelect($<HTMLSelectElement>('#qBitrate'), String(v.bitrateKbps), formatKbps(v.bitrateKbps));
+}
+
+/** Всплывающие панели нижней строки: кнопка → панель. Открыта не больше одной. */
+const POPOVERS: Record<string, { button: string; onOpen?: () => void }> = {
+  '#streamQualityPanel': { button: '#btnStreamQuality', onOpen: () => fillStreamQuality() },
+  '#volumePanel': { button: '#btnVolume' },
+};
+
+function togglePopover(panel: string, show = $(panel).hidden): void {
+  for (const [id, { button, onOpen }] of Object.entries(POPOVERS)) {
+    const open = id === panel && show;
+    if (open && $(id).hidden) onOpen?.();
+    $(id).hidden = !open;
+    $(button).setAttribute('aria-expanded', String(open));
+  }
+}
+
+function closePopovers(): void {
+  togglePopover('', false);
+}
+
+/** Применяет выбранное в панели «Качество» тем же путём, что и диалог настроек: без остановки трансляции */
+async function applyStreamQuality(): Promise<void> {
+  const selects = [...document.querySelectorAll<HTMLSelectElement>('#streamQualityPanel select')];
+  const [width = 0, height = 0] = $<HTMLSelectElement>('#qResolution').value.split('x').map(Number);
+  const video: Config['video'] = {
+    ...state.cfg.video,
+    width,
+    height,
+    frameRate: Number($<HTMLSelectElement>('#qFps').value),
+    bitrateKbps: Number($<HTMLSelectElement>('#qBitrate').value),
+  };
+  video.minBitrateKbps = Math.min(video.minBitrateKbps, video.bitrateKbps);
+  selects.forEach((s) => (s.disabled = true));
+  try {
+    await saveSettings({ ...state.cfg, video }, { notice: `Трансляция: ${streamQualityLabel(video)} · до ${formatKbps(video.bitrateKbps)}` });
+  } catch (err) {
+    toast(`Не удалось применить: ${(err as Error).message}`, 'error');
+  } finally {
+    selects.forEach((s) => (s.disabled = false));
+    fillStreamQuality(); // настройки могли поправиться при сохранении (пределы битрейта)
+    render();
+  }
 }
 
 /**
@@ -763,6 +834,8 @@ async function openCapture(pick: SourcePick, { forceChromium = false } = {}): Pr
       return capture;
     } catch (err) {
       native.stop();
+      // Свёрнутое окно не отдаст кадров и захвату Chromium — сразу понятная причина вместо его ошибки
+      if (/свёрнуто/.test((err as Error).message)) throw err;
       toast(`Собственный захват не запустился (${(err as Error).message}). Использую захват Chromium — до ~60 FPS.`, 'warn', 9000);
     }
   }
@@ -1434,7 +1507,10 @@ function renderQuality(stats: StatsSample | null): void {
     const kbps = stats.video?.kbps ?? (out ? stats.audio.outKbps : stats.audio.inKbps);
     const ping = stats.rttMs != null ? `${Math.round(stats.rttMs)} мс` : '— мс';
     const loss = stats.lossPct != null ? `${stats.lossPct.toFixed(1)}%` : '0.0%';
-    $('#qualityText').textContent = `${out ? '↑' : '↓'} ${formatKbps(kbps)} · ${ping} · потери ${loss}`;
+    // В панели — только пинг и заметные потери; остальное — в подсказке и в подробной статистике
+    const lossy = (stats.lossPct ?? 0) >= 1;
+    $('#qualityText').textContent = lossy ? `${ping} · потери ${loss}` : ping;
+    button.title = `${out ? 'Отдача' : 'Приём'} ${formatKbps(kbps)} · пинг ${ping} · потери ${loss}. Щелчок — подробная статистика`;
   }
   if (state.hudOpen) {
     const extra = hudExtras();
@@ -1458,7 +1534,7 @@ function renderQuality(stats: StatsSample | null): void {
 
 // ======================= настройки и диагностика =======================
 
-async function saveSettings(next: Config): Promise<void> {
+async function saveSettings(next: Config, { notice = 'Настройки сохранены' } = {}): Promise<void> {
   const prev = state.cfg;
   state.cfg = await window.duo.saveConfig(next);
   const cfg = state.cfg;
@@ -1478,16 +1554,27 @@ async function saveSettings(next: Config): Promise<void> {
   const cv = cfg.video;
   const captureChanged = pv.width !== cv.width || pv.height !== cv.height || pv.frameRate !== cv.frameRate;
   const track = state.screen?.getVideoTracks()[0];
-  if (track && state.lastPick && (pv.captureEngine !== cv.captureEngine || (captureChanged && state.capture?.engine === 'native'))) {
-    // Сменился способ захвата или FPS/разрешение собственного захвата — открываем источник заново
+  const capture = state.capture;
+  if (track && state.lastPick && pv.captureEngine !== cv.captureEngine) {
+    // Сменился способ захвата — открываем источник заново
     await beginCapture(state.lastPick);
-  } else if (track) {
+  } else if (track && capture) {
     track.contentHint = cv.contentHint;
     if (captureChanged) {
-      await track.applyConstraints(captureConstraints(cv)).catch((err: Error) => toast(`Параметры захвата: ${err.message}`, 'warn'));
-      const s = track.getSettings();
-      if (state.capture) Object.assign(state.capture, { width: s.width ?? 0, height: s.height ?? 0 });
-      if (state.session?.wouldGrowFrame((s.width ?? 0) * (s.height ?? 0))) await restartVideoEncoder('изменён размер захвата');
+      if (capture.engine === 'native') {
+        // Собственный захват не перезапускаем: частота — командой процессу захвата, разрешение — масштабом
+        // кодирования. Перезапуск ломал трансляцию, если окно в этот момент было свёрнуто (кадров нет)
+        if (pv.frameRate !== cv.frameRate) await capture.native?.setFps(cv.frameRate);
+      } else {
+        await track.applyConstraints(captureConstraints(cv)).catch((err: Error) => toast(`Параметры захвата: ${err.message}`, 'warn'));
+        const s = track.getSettings();
+        Object.assign(capture, { width: s.width ?? 0, height: s.height ?? 0 });
+      }
+      capture.scale = captureScale(capture);
+      await state.session?.setScale(capture.scale);
+      const area = (capture.width / capture.scale) * (capture.height / capture.scale);
+      capture.lastArea = area;
+      if (state.session?.wouldGrowFrame(area)) await restartVideoEncoder('изменены параметры трансляции');
       sendStreamState();
     }
   }
@@ -1510,7 +1597,7 @@ async function saveSettings(next: Config): Promise<void> {
       toast('Сетевые настройки применятся при следующем подключении', 'info');
     }
   }
-  toast('Настройки сохранены', 'ok', 2500);
+  toast(notice, 'ok', 2500);
   applyVoiceState(); // режим рации мог включиться или выключиться
 }
 
@@ -1588,6 +1675,7 @@ function render(): void {
   $('#statusText').textContent = text;
   const presence = state.peer ? state.peerPresence : null;
   const ptt = presence?.mic === 'ptt' ? ' · рация' : '';
+  $('#peerChip').hidden = !state.peer;
   $('#peerName').textContent = state.peer ? `${ROLE_NAME[state.peer.role]}: ${state.peer.name}${ptt}` : '';
   $('#peerMicOff').hidden = !presence || !['off', 'none'].includes(presence.mic);
   $('#peerMicOff').title = presence?.mic === 'none' ? 'У собеседника нет микрофона' : 'У собеседника выключен микрофон';
@@ -1656,6 +1744,12 @@ function render(): void {
   streamBtn.classList.toggle('danger', Boolean(state.screen));
   setIcon(streamBtn.querySelector<HTMLElement>('i')!, state.screen ? 'stop' : 'screen');
   streamBtn.querySelector('span')!.textContent = state.screen ? 'Остановить стрим' : 'Начать стрим';
+  // Смена источника и качества — только во время трансляции
+  const live = connected && streamer && Boolean(state.screen);
+  $('#btnSwitchSource').hidden = !live;
+  $('#btnStreamQuality').hidden = !live;
+  $('#streamQualityText').textContent = streamQualityLabel(state.cfg.video);
+  if (!live && !$('#streamQualityPanel').hidden) togglePopover('#streamQualityPanel', false);
   $('#btnDisconnect').hidden = !connected;
 
   const mic = state.mic;
@@ -1684,6 +1778,7 @@ function render(): void {
   denoiseBtn.setAttribute('aria-pressed', String(ds !== 'off'));
   const denoiseText: Record<DenoiseState, string> = { on: 'Шумодав', off: 'Шумодав выкл', loading: 'Шумодав…', error: 'Шумодав: ошибка' };
   $('#denoiseText').textContent = denoiseText[ds];
+  denoiseBtn.title = `${denoiseText[ds]} — шумоподавление микрофона (DeepFilterNet3 / DTLN)${keyHint('toggleDenoise')}`;
 
   $('#streamVolumeWrap').hidden = streamer;
   $('#streamSendWrap').hidden = !streamer;
@@ -1784,6 +1879,16 @@ function bindEvents(): void {
     }
   });
   $('#btnStream').addEventListener('click', () => (state.screen ? stopStream() : startStream()));
+  $('#btnSwitchSource').addEventListener('click', () => void switchSource());
+  for (const [panel, { button }] of Object.entries(POPOVERS)) $(button).addEventListener('click', () => togglePopover(panel));
+  for (const id of ['#qResolution', '#qFps', '#qBitrate']) $(id).addEventListener('change', () => void applyStreamQuality());
+  // Панель закрывается щелчком мимо неё и клавишей Esc
+  document.addEventListener('pointerdown', (e) => {
+    if (!(e.target as Element).closest('.popover-anchor')) closePopovers();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closePopovers();
+  });
   $('#btnDisconnect').addEventListener('click', disconnect);
   $<HTMLButtonElement>('#btnMic').addEventListener('click', toggleMic);
   $('#btnDeafen').addEventListener('click', toggleDeafen);

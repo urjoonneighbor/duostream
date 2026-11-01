@@ -1,7 +1,7 @@
 # Приложение DuoStream (Electron)
 
 ```powershell
-npm install          # Electron, ONNX Runtime в src/renderer/vendor/ort, сборка захвата (если есть .NET SDK 10)
+npm install          # Electron, ONNX Runtime в src/renderer/vendor/ort, сборка захвата (.NET SDK 10 скачается сам)
 npm start            # сборка TypeScript (npm run build → app/) и запуск
 npm run typecheck    # проверка типов всех частей без сборки
 npm run start:viewer # второй экземпляр с отдельным профилем (проверка на одном ПК)
@@ -30,7 +30,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ensure-electron.ps1
 - **native/capture/** (C#, .NET 10) — собственный захват: Windows Graphics Capture с
   `MinUpdateInterval = 1 мс` (встроенный в Chromium захват на Windows 11 24H2+ ограничен ~60 FPS),
   кольцо общих D3D11-текстур с NT-хэндлами, продублированными в процесс Electron, выбор той же
-  видеокарты, что у Chromium, ресайз окон без пересоздания текстур (`visibleRect`).
+  видеокарты, что у Chromium. Текстуры кольца — ровно размера кадра: аппаратный кодировщик Chromium
+  кодирует текстуру целиком, не глядя на видимую часть, поэтому при смене размера окна кольцо пересоздаётся.
 - **src/main/native-capture.ts** — запускает процесс захвата, импортирует текстуры через
   `sharedTexture`, отправляет их в окно и возвращает процессу освобождённые; ошибки и закрытие
   источника уходят в интерфейс событиями.

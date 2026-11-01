@@ -501,6 +501,11 @@ function registerIpc() {
     }
   });
 
+  ipcMain.handle('native-capture:fps', (event, session, fps) => {
+    if (!isTrustedSender(event) || !Number.isInteger(session)) return false;
+    return nativeCapture.setFps(session, Math.min(240, Math.max(1, Math.round(Number(fps) || 60))));
+  });
+
   ipcMain.handle('native-capture:stop', (event, session) => {
     if (!isTrustedSender(event)) throw new Error('forbidden');
     nativeCapture.stop(Number.isInteger(session) ? session : undefined);

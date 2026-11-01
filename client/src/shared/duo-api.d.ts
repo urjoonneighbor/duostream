@@ -177,8 +177,13 @@ export interface DuoApi {
     status(): Promise<NativeCaptureStatus>;
     start(sourceId: string, fps: number): Promise<Result<{ session: number; width: number; height: number; adapter: string }>>;
     stop(session: number): Promise<void>;
-    /** imported.getVideoFrame() даёт VideoFrame на GPU */
-    onFrame(cb: (imported: ImportedTexture, session: number) => Promise<void> | void): void;
+    /** Новая предельная частота кадров без перезапуска захвата; false — захват уже остановлен */
+    setFps(session: number, fps: number): Promise<boolean>;
+    /**
+     * Подписка на кадры; возвращает отписку. imported.getVideoFrame() даёт VideoFrame на GPU,
+     * width × height — видимая часть текстуры (левый верхний угол)
+     */
+    onFrame(cb: (imported: ImportedTexture, session: number, width: number, height: number) => Promise<void> | void): () => void;
     onEvent(cb: (e: NativeCaptureEvent) => void): void;
   };
 }

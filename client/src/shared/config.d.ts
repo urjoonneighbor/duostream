@@ -80,6 +80,8 @@ export interface Config {
   };
   playback: {
     streamBufferMs: number;
+    /** Запас буфера голоса собеседника, мс: сглаживает опоздания пакетов ценой небольшой задержки */
+    voiceBufferMs: number;
   };
   app: {
     autoUpdate: boolean;
