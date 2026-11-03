@@ -38,6 +38,7 @@ import { PortMapper } from './upnp.ts';
 import { AppAudioCapture } from './app-audio.ts';
 import { log, type LogLevel } from './logger.ts';
 import { Downloads, Uploads } from './downloads.ts';
+import { linkPreview } from './link-preview.ts';
 import { Overlay } from './overlay.ts';
 import { AppTray } from './tray.ts';
 import type { Config } from '../shared/config';
@@ -539,7 +540,29 @@ function registerIpc() {
       overlayVisible: overlay.visible,
       elevated: isElevated,
       profile: profile ?? null,
+      activeRenderer: renderer,
     };
+  });
+
+  // Перезапуск — например, чтобы стример получил отрисовку D3D11 (её выбирают при старте, см. renderer выше).
+  // У portable-версии работающий exe — временная распакованная копия; перезапускаем сам portable-файл
+  // Предпросмотр ссылки из чата: страницу скачивает отправитель (src/main/link-preview.ts)
+  ipcMain.handle('link:preview', (event, url) => {
+    if (!isTrustedSender(event) || typeof url !== 'string' || url.length > 2048) return null;
+    return linkPreview(url);
+  });
+
+  // Ссылки из чата — в браузере по умолчанию (переходы внутри окна запрещены)
+  ipcMain.handle('link:open', async (event, url) => {
+    if (!isTrustedSender(event) || typeof url !== 'string' || !/^https?:\/\//i.test(url) || url.length > 2048) return;
+    await shell.openExternal(url);
+  });
+
+  ipcMain.handle('app:relaunch', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    const portable = process.env.PORTABLE_EXECUTABLE_FILE;
+    app.relaunch(portable ? { execPath: portable, args: process.argv.slice(1) } : undefined);
+    app.quit();
   });
 }
 

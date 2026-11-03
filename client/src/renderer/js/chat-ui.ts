@@ -1,6 +1,6 @@
 // Панель чата: сообщения, файлы с прогрессом, отправка (кнопка, Enter, перетаскивание файлов в окно).
 import { $, toast } from './ui.ts';
-import type { Chat, ChatItem, Transfer, TransferStatus } from './chat.ts';
+import { URL_PATTERN, type Chat, type ChatItem, type MessageItem, type Transfer, type TransferStatus } from './chat.ts';
 
 const STATUS: Record<TransferStatus, (t: Transfer) => string> = {
   offered: (t) => (t.mine ? 'ждёт, пока собеседник примет' : 'собеседник предлагает файл'),
@@ -61,6 +61,12 @@ export class ChatPanel {
     });
     $('#chatList').addEventListener('click', (e) => {
       const target = e.target as Element;
+      const link = target.closest<HTMLAnchorElement>('a.chat-link, a.link-card');
+      if (link) {
+        e.preventDefault(); // внутри окна переходы запрещены — открываем в браузере
+        void window.duo.openLink(link.href);
+        return;
+      }
       const thumb = target.closest<HTMLImageElement>('img.chat-thumb');
       if (thumb) this.viewImage(thumb.src, thumb.alt);
       else this.onAction(target.closest<HTMLButtonElement>('button[data-act]'));
@@ -222,8 +228,55 @@ export class ChatPanel {
     const meta = document.createElement('div');
     meta.className = 'meta';
     meta.textContent = `${item.mine ? 'Вы' : this.peerName()} · ${time(item.ts)}${item.pending ? ' · ждёт связи' : ''}`;
-    node.replaceChildren(meta, ...(item.kind === 'msg' ? [document.createTextNode(item.text)] : this.fileBody(item)));
+    node.replaceChildren(meta, ...(item.kind === 'msg' ? this.messageBody(item) : this.fileBody(item)));
     if (atBottom || item.mine) this.scrollDown();
+  }
+
+  /** Текст со ссылками (открываются в браузере) и карточка первой ссылки */
+  private messageBody(item: MessageItem): Node[] {
+    const text = document.createElement('div');
+    let last = 0;
+    for (const match of item.text.matchAll(URL_PATTERN)) {
+      const at = match.index ?? 0;
+      text.append(item.text.slice(last, at));
+      const link = document.createElement('a');
+      link.href = match[0];
+      link.textContent = match[0];
+      link.className = 'chat-link';
+      link.title = 'Открыть в браузере';
+      text.append(link);
+      last = at + match[0].length;
+    }
+    text.append(item.text.slice(last));
+    const parts: Node[] = [text];
+    const p = item.preview;
+    if (p) {
+      const card = document.createElement('a');
+      card.href = p.url;
+      card.className = 'link-card';
+      card.title = p.url;
+      if (p.image) {
+        const media = document.createElement('div');
+        media.className = `link-card-media${p.video ? ' video' : ''}`;
+        const img = document.createElement('img');
+        img.src = p.image;
+        img.alt = '';
+        media.append(img);
+        card.append(media);
+      }
+      const body = document.createElement('div');
+      body.className = 'link-card-body';
+      for (const [cls, value] of [['link-card-site', p.site], ['link-card-title', p.title], ['link-card-desc', p.description]] as const) {
+        if (!value) continue;
+        const line = document.createElement('div');
+        line.className = cls;
+        line.textContent = value;
+        body.append(line);
+      }
+      card.append(body);
+      parts.push(card);
+    }
+    return parts;
   }
 
   private fileBody(t: Transfer): HTMLElement[] {
