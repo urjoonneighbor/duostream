@@ -14,6 +14,7 @@
 //   {"type":"frame","gen":G,"i":слот,"ts":мкс,"w":ширина кадра,"h":высота кадра} — новый кадр или
 //                  повтор последнего, если источник не менялся 100 мс
 //   {"type":"stats","fps":…,"dropped":…,"copyMs":…}                       — раз в 2 с
+//   {"type":"idle"} / {"type":"active"} — картинка замерла (новых кадров от Windows нет IdleMs) / снова меняется
 //   {"type":"closed"} — источник закрыт;  {"type":"error","message":"…"} — фатальная ошибка
 // stdin:
 //   "gen G"        — Electron перешёл на кольцо G, старые хэндлы в его процессе можно закрыть
@@ -105,6 +106,13 @@ static unsafe class Program
     // Захватываемое окно (IntPtr.Zero — экран): пока оно свёрнуто, кадры WGC (крошечная заглушка) пропускаются,
     // а зрителю повторяется последний нормальный кадр
     static IntPtr watchedWindow;
+
+    // Картинка замерла (пауза в плеере): новых кадров от WGC нет IdleMs. Интерфейс на это время ограничивает
+    // битрейт, иначе кодировщик за паузу опускает квантизатор до минимума и после неё 2–3 с выдаёт огромные кадры —
+    // WebRTC выбрасывает кадры, у зрителя пролаг. Время последнего кадра WGC — тики Stopwatch.
+    const int IdleMs = 1500;
+    static long lastSourceFrame = Stopwatch.GetTimestamp();
+    static int idle; // 1 — сообщили «замерла», ждём нового кадра
     static int ringSize;
     static string ringAdapter = "";
     static long ringCreatedAt;
@@ -291,6 +299,11 @@ static unsafe class Program
             Thread.Sleep(RepeatMs / 2);
             try
             {
+                if (Stopwatch.GetTimestamp() - Interlocked.Read(ref lastSourceFrame) > Stopwatch.Frequency * IdleMs / 1000 &&
+                    Interlocked.CompareExchange(ref idle, 1, 0) == 0)
+                {
+                    Emit("{\"type\":\"idle\"}");
+                }
                 lock (gpuLock)
                 {
                     var r = ring;
@@ -444,6 +457,8 @@ static unsafe class Program
                 using var frame = sender.TryGetNextFrame();
                 if (frame == null) return;
                 if (watchedWindow != IntPtr.Zero && IsIconic(watchedWindow)) return;
+                Interlocked.Exchange(ref lastSourceFrame, Stopwatch.GetTimestamp());
+                if (Interlocked.Exchange(ref idle, 0) == 1) Emit("{\"type\":\"active\"}");
                 var content = frame.ContentSize;
                 if (content.Width != poolSize.Width || content.Height != poolSize.Height)
                 {

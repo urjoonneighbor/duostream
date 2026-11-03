@@ -117,6 +117,8 @@ export class PeerSession extends Emitter<PeerEvents> {
   private micTrack: MediaStreamTrack | null;
   screenStream: MediaStream | null = null;
   private scaleDownBy = 1;
+  /** Временный потолок битрейта видео, кбит/с (картинка замерла — см. onCaptureActivity в app.ts); null — без него */
+  bitrateCapKbps: number | null = null;
   maxFrameArea = 0;
   codecOrder: CodecName[] = [];
   /** Кодеки, которые уже пробовали при поиске аппаратного энкодера (app.ts → checkEncoder) */
@@ -388,6 +390,13 @@ export class PeerSession extends Emitter<PeerEvents> {
     return this.applySenderParams();
   }
 
+  /** Временный потолок битрейта видео (не ниже минимального битрейта из настроек); null — снять */
+  setBitrateCap(kbps: number | null): Promise<void> {
+    if (kbps === this.bitrateCapKbps) return this.paramsChain;
+    this.bitrateCapKbps = kbps;
+    return this.applySenderParams();
+  }
+
   setScale(scaleDownBy: number): Promise<void> {
     this.scaleDownBy = scaleDownBy;
     return this.applySenderParams();
@@ -410,7 +419,10 @@ export class PeerSession extends Emitter<PeerEvents> {
           await updateEncoding(
             this.videoT.sender,
             {
-              maxBitrate: v.bitrateKbps * 1000,
+              maxBitrate:
+                (this.bitrateCapKbps === null
+                  ? v.bitrateKbps
+                  : Math.max(v.minBitrateKbps, Math.min(v.bitrateKbps, this.bitrateCapKbps))) * 1000,
               maxFramerate: v.frameRate,
               scaleResolutionDownBy: this.scaleDownBy ?? 1,
               priority: 'high',

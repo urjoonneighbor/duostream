@@ -25,6 +25,8 @@ type HelperMessage =
   | { type: 'frame'; gen: number; i: number; ts: number; w: number; h: number }
   | { type: 'stats'; fps: number; dropped: number; copyMs: number }
   | { type: 'closed' }
+  | { type: 'idle' }
+  | { type: 'active' }
   | { type: 'error'; message: string };
 
 export function helperPath(): string {
@@ -225,6 +227,10 @@ export class NativeCapture {
               deliverMaxMs: deliver.maxMs,
             });
             deliver = { count: 0, totalMs: 0, maxMs: 0 };
+            break;
+          case 'idle':
+          case 'active':
+            if (started) onEvent({ session, type: 'activity', active: msg.type === 'active' });
             break;
           case 'closed':
             clearTimeout(timer);
