@@ -16,7 +16,7 @@ import { ChatPanel } from './chat-ui.ts';
 import { SettingsDialog, setSelect } from './settings.ts';
 import { $, toast, renderIcons, setIcon, renderList } from './ui.ts';
 import { playCue, type Cue } from './tones.ts';
-import type { CodecName, Config, HotkeyAction, Role } from '../../shared/config';
+import type { CodecName, Config, HotkeyAction, Renderer, Role } from '../../shared/config';
 import type { DesktopSource, HotkeyPhase, NativeCaptureEvent, NativeCaptureStatus, UpdateState, UpdateStatus, UpnpState } from '../../shared/duo-api';
 
 // Всё, что интерфейс пишет в консоль (в том числе каждое уведомление), — ещё и в журнал сеанса
@@ -160,6 +160,8 @@ interface AppState {
   overlayActive: boolean;
   /** Последнее входящее сообщение — в оверлей */
   lastChat: { from: string; text: string; at: number } | null;
+  /** Чем рисует окно в этом запуске: выбирается при старте по роли из настроек */
+  activeRenderer: Renderer;
 }
 
 const state: AppState = {
@@ -213,6 +215,7 @@ const state: AppState = {
   playback: null as unknown as AppState['playback'], // создаётся в init()
   overlayActive: false,
   lastChat: null,
+  activeRenderer: 'd3d11',
 };
 
 // Для отладки в DevTools (F12): duoDebug.session.pc.remoteDescription.sdp и т. п.
@@ -414,7 +417,10 @@ async function connect(event: Event): Promise<void> {
     if (role === 'streamer') prepareShareAddress(hostServer ? port : Number(new URL(url).port) || 80);
     if (role === 'streamer') openRouterPorts(hostServer ? port : null);
     await ensureMic();
-    if (role === 'streamer') await ensureCodecProbe();
+    if (role === 'streamer') {
+      await ensureCodecProbe();
+      warnStreamerRenderer();
+    }
 
     const signaling = new SignalingClient({ url, password, role, name: name || ROLE_NAME[role] });
     state.signaling = signaling;
@@ -748,7 +754,36 @@ function chooseSource(): Promise<SourcePick | null> {
   });
 }
 
+const RENDERER_NAME: Record<Renderer, string> = {
+  d3d11: 'D3D11',
+  opengl: 'OpenGL',
+  vulkan: 'Vulkan',
+  software: 'без видеокарты',
+};
+
+/**
+ * Способ отрисовки выбирается при запуске, а другой, кроме D3D11, — только для просмотра (настройка зрителя).
+ * Стал стримером без перезапуска — захват и кодирование работают плохо: аппаратного кодировщика нет
+ * (Media Foundation работает через D3D11), видео кодирует процессор, а кадры захвата (текстуры D3D11)
+ * в предпросмотре мигают белым. Перезапуск с ролью стримера сам включит D3D11.
+ */
+function streamerRendererProblem(): string | null {
+  if (state.activeRenderer === 'd3d11') return null;
+  return (
+    `Сейчас отрисовка «${RENDERER_NAME[state.activeRenderer]}» — она для просмотра. Для трансляции нужен D3D11: ` +
+    'иначе видео кодирует процессор, а картинка мигает. Перезапустите DuoStream — стример получит D3D11 сам.'
+  );
+}
+
+function warnStreamerRenderer(level: 'warn' | 'error' = 'warn'): boolean {
+  const problem = streamerRendererProblem();
+  if (!problem) return false;
+  toast(problem, level, 0, { label: 'Перезапустить', onClick: () => void window.duo.relaunch() });
+  return true;
+}
+
 async function startStream(): Promise<void> {
+  if (warnStreamerRenderer('error')) return;
   const pick = await chooseSource();
   if (pick) await beginCapture(pick);
 }
@@ -1929,6 +1964,7 @@ async function init(): Promise<void> {
   state.role = config.signaling.role;
   if (error) toast(error, 'error', 12000);
   state.nativeStatus = await nativeCaptureStatus();
+  state.activeRenderer = (await window.duo.getAppInfo().catch(() => null))?.activeRenderer ?? 'd3d11';
   if (!state.nativeStatus.available) console.warn('[capture] собственный захват недоступен:', state.nativeStatus.reason);
   window.duo.nativeCapture.onEvent(onNativeEvent);
 

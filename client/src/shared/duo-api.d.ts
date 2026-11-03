@@ -1,6 +1,6 @@
 // Мост между интерфейсом и главным процессом: window.duo (src/preload/preload.ts).
 // Общий тип для обеих сторон — preload реализует DuoApi, интерфейс вызывает его методы.
-import type { Config, HotkeyAction, HotkeyBinding, OverlayCorner } from './config';
+import type { Config, HotkeyAction, HotkeyBinding, OverlayCorner, Renderer } from './config';
 
 export type HotkeyPhase = 'down' | 'up';
 export type LogLevel = 'info' | 'warn' | 'error';
@@ -82,6 +82,18 @@ export interface OverlayState {
   message?: string | null;
 }
 
+/** Карточка ссылки в чате: её готовит отправитель (src/main/link-preview.ts) и шлёт вместе с сообщением */
+export interface LinkPreview {
+  url: string;
+  site?: string;
+  title: string;
+  description?: string;
+  /** Уменьшенная картинка: data:image/jpeg;base64,… */
+  image?: string;
+  /** Видео (YouTube, og:type video) — на картинке рисуется значок воспроизведения */
+  video?: boolean;
+}
+
 export interface GpuSummary {
   devices: { vendor: string; deviceId: string; active: boolean; description: string }[];
   renderer: string;
@@ -100,6 +112,8 @@ export interface AppInfo {
   overlayVisible: boolean;
   elevated: boolean;
   profile: string | null;
+  /** Чем рисует окно в этом запуске (выбирается при старте по роли из настроек, см. main.ts) */
+  activeRenderer: Renderer;
 }
 
 /** Кадр для «Отметить глюк»: имя вида 012_-0345ms.jpg и JPEG */
@@ -120,6 +134,12 @@ export interface DuoApi {
   /** Журнал сеанса (src/main/logger.ts) */
   log(level: LogLevel, text: string): void;
   revealLog(): Promise<string | null>;
+  /** Перезапуск приложения (например, чтобы сменить способ отрисовки) */
+  relaunch(): Promise<void>;
+  /** Карточка ссылки (страницу скачивает это приложение) или null */
+  linkPreview(url: string): Promise<LinkPreview | null>;
+  /** Открыть ссылку в браузере по умолчанию (только http/https) */
+  openLink(url: string): Promise<void>;
   /** PNG (data:) рядом с журналом → имя файла */
   saveLogImage(dataUrl: string): Promise<string | null>;
   /** Кадры отметки глюка → папка и сколько сохранено (null — лимит за сеанс) */

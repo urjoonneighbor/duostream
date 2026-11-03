@@ -30,6 +30,7 @@ const IMAGE_TYPES: Record<string, string> = {
 
 import { Emitter } from './events.ts';
 import type { PeerSession } from './peer.ts';
+import type { LinkPreview } from '../../shared/duo-api';
 
 export type TransferStatus = 'offered' | 'sending' | 'finishing' | 'receiving' | 'done' | 'rejected' | 'cancelled' | 'error';
 
@@ -40,6 +41,8 @@ export interface MessageItem {
   text: string;
   ts: number;
   pending?: boolean;
+  /** Карточка первой ссылки в тексте */
+  preview?: LinkPreview;
 }
 
 /** Передача файла — входящая или исходящая */
@@ -79,6 +82,7 @@ export type ChatItem = MessageItem | Transfer;
 /** Управляющие сообщения канала «chat» */
 type Control =
   | { t: 'msg'; id: number; text: string; ts: number }
+  | { t: 'msg-preview'; id: number; preview: unknown }
   | { t: 'file-offer'; id: number; name: string; size: number }
   | { t: 'file-accept'; id: number; offset: number }
   | { t: 'file-reject'; id: number }
@@ -86,6 +90,26 @@ type Control =
   | { t: 'file-received'; id: number };
 
 type Channels = { chat: RTCDataChannel; file: RTCDataChannel };
+
+/** Ссылки в тексте сообщения (без завершающих знаков препинания) */
+export const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'«»]+[^\s<>"'«».,;:!?)\]}]/gi;
+
+const MAX_PREVIEW_IMAGE = 200_000; // символов data: URL — сообщение канала не больше 256 КБ
+
+/** Карточка от собеседника: только ожидаемые поля разумной длины, ссылка http(s), картинка — JPEG data: URL */
+function sanitizePreview(raw: unknown): LinkPreview | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as Record<string, unknown>;
+  const text = (v: unknown, max: number) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
+  const url = text(p.url, 2048);
+  const title = text(p.title, 300);
+  if (!url || !/^https?:\/\//i.test(url) || !title) return null;
+  const image =
+    typeof p.image === 'string' && p.image.length <= MAX_PREVIEW_IMAGE && /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(p.image)
+      ? p.image
+      : undefined;
+  return { url, title, site: text(p.site, 100), description: text(p.description, 400), image, video: p.video === true };
+}
 
 const randomId = () => crypto.getRandomValues(new Uint32Array(1))[0];
 
@@ -166,9 +190,26 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
     const value = String(text).trim();
     if (!value) return;
     const msg = { t: 'msg' as const, id: randomId(), text: value.slice(0, 20_000), ts: Date.now() };
-    this.items.push({ kind: 'msg', id: msg.id, mine: true, text: msg.text, ts: msg.ts, pending: !this.connected });
+    const item: MessageItem = { kind: 'msg', id: msg.id, mine: true, text: msg.text, ts: msg.ts, pending: !this.connected };
+    this.items.push(item);
     if (!this.sendControl(msg)) this.outbox.push(msg);
     this.changed();
+    void this.attachPreview(item);
+  }
+
+  /**
+   * Карточка первой ссылки: страницу скачивает наше приложение (src/main/link-preview.ts), собеседнику
+   * уходит готовая карточка — у него ничего не загружается
+   */
+  private async attachPreview(item: MessageItem): Promise<void> {
+    const url = item.text.match(URL_PATTERN)?.[0];
+    if (!url) return;
+    const preview = sanitizePreview(await window.duo.linkPreview(url).catch(() => null));
+    if (!preview) return;
+    item.preview = preview;
+    this.changed(item);
+    const msg: Control = { t: 'msg-preview', id: item.id, preview };
+    if (!this.sendControl(msg)) this.outbox.push(msg);
   }
 
   private onControl(raw: unknown): void {
@@ -184,6 +225,15 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
         const item: MessageItem = { kind: 'msg', id: msg.id, mine: false, text: String(msg.text ?? '').slice(0, 20_000), ts: Number(msg.ts) || Date.now() };
         this.items.push(item);
         this.changed(item);
+        break;
+      }
+      case 'msg-preview': {
+        const item = this.items.find((i): i is MessageItem => i.kind === 'msg' && !i.mine && i.id === msg.id);
+        const preview = sanitizePreview(msg.preview);
+        if (item && preview && !item.preview) {
+          item.preview = preview;
+          this.changed(item);
+        }
         break;
       }
       case 'file-offer':
