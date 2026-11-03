@@ -23,6 +23,8 @@ export type NativeCaptureEvent =
   | { session: number; type: 'error'; message: string }
   | { session: number; type: 'size'; width: number; height: number }
   | { session: number; type: 'closed' }
+  /** Картинка замерла (active: false — новых кадров от Windows нет 1,5 с) или снова меняется */
+  | { session: number; type: 'activity'; active: boolean }
   | {
       session: number;
       type: 'stats';

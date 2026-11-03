@@ -1014,6 +1014,10 @@ async function beginCapture(pick: SourcePick, options?: { forceChromium?: boolea
   }
   // Энкодер создаётся под первый кадр — запоминаем его размер сразу, не дожидаясь статистики
   state.session?.noteEncodedFrame(width, height);
+  // Потолок «картинка замерла» относился к прежнему источнику
+  rampTimers.forEach(clearTimeout);
+  rampTimers = [];
+  void state.session?.setBitrateCap(null);
 
   const engine = capture.engine === 'native' ? 'собственный захват' : 'захват Chromium';
   toast(`Трансляция: ${pick.source.name} · ${width}×${height} · до ${v.frameRate} FPS · ${engine}${withAudio}`, 'ok');
@@ -1021,6 +1025,45 @@ async function beginCapture(pick: SourcePick, options?: { forceChromium?: boolea
   if (capture.engine === 'native') watchNativeFrames(capture);
   render();
   return true;
+}
+
+/**
+ * Пауза в плеере. Пока картинка стоит, кодировщик опускает квантизатор до минимума (доводит статичный кадр
+ * до максимальной чёткости), а после паузы ещё 2–3 с кодирует движение с ним же: кадры огромные, битрейт выше
+ * цели, WebRTC выбрасывает кадры — у зрителя пролаг. Поэтому на время паузы битрейт ограничивается, а после
+ * неё поднимается ступенями: кодировщик сразу стартует с нормальным квантизатором (замерено: восстановление
+ * за ~1 с вместо 3,5–4 с).
+ */
+const STATIC_CAP_KBPS = 6000;
+const RESUME_RAMP: [number, number][] = [
+  [300, 0.3],
+  [800, 0.45],
+  [1300, 0.7],
+  [1800, 1],
+];
+let rampTimers: number[] = [];
+
+function onCaptureActivity(active: boolean): void {
+  rampTimers.forEach(clearTimeout);
+  rampTimers = [];
+  const session = state.session;
+  if (!session || state.role !== 'streamer') return;
+  const max = state.cfg.video.bitrateKbps;
+  if (!active) {
+    console.log(`[encoder] картинка замерла — битрейт до ${formatKbps(Math.min(max, STATIC_CAP_KBPS))}`);
+    void session.setBitrateCap(Math.min(max, STATIC_CAP_KBPS));
+    return;
+  }
+  if (session.bitrateCapKbps === null) return;
+  console.log('[encoder] картинка снова меняется — битрейт поднимается за 1,8 с');
+  for (const [ms, share] of RESUME_RAMP) {
+    rampTimers.push(
+      window.setTimeout(() => {
+        if (state.session !== session) return;
+        void session.setBitrateCap(share >= 1 ? null : Math.max(STATIC_CAP_KBPS, Math.round(max * share)));
+      }, ms),
+    );
+  }
 }
 
 /** Если кадры собственного захвата не дошли до трека за 3 с — переходим на захват Chromium. */
@@ -1057,6 +1100,8 @@ function onNativeEvent(e: NativeCaptureEvent): void {
     if (capture.lastArea && area > capture.lastArea) capture.grewSinceEncoderStart = true;
     capture.lastArea = area;
     scheduleGrowthCheck(capture);
+  } else if (e.type === 'activity') {
+    onCaptureActivity(e.active);
   } else if (e.type === 'closed') {
     void stopStream('Источник захвата закрыт — трансляция остановлена');
   } else if (e.type === 'error') {
