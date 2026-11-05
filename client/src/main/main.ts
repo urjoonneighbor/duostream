@@ -13,6 +13,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   desktopCapturer,
   ipcMain,
   net,
@@ -48,6 +49,7 @@ import type { AppInfo, DesktopSource, GpuSummary, OverlayState } from '../shared
 const APP_ROOT = path.join(__dirname, '..', '..');
 // HTML, CSS, картинки, модели — как есть из исходников
 const RENDERER_ROOT = path.join(APP_ROOT, 'src', 'renderer');
+const TOPBAR_HEIGHT = 48; // высота верхней панели окна = --topbar-h в styles.css
 // Скрипты интерфейса (.js) — собранные из .ts
 const RENDERER_JS_ROOT = path.join(APP_ROOT, 'app', 'renderer');
 // Шаблон по умолчанию (попадает в сборку) и рабочий файл при запуске из исходников (не в git)
@@ -566,6 +568,35 @@ function registerIpc() {
   });
 }
 
+/**
+ * Меню по правому щелчку: своего у Electron нет. Картинки из чата (скриншоты), выделенный текст,
+ * ссылки; в полях ввода — ещё вырезать/вставить.
+ */
+function showContextMenu(win: BrowserWindow, params: Electron.ContextMenuParams): void {
+  const items: Electron.MenuItemConstructorOptions[] = [];
+  const flags = params.editFlags;
+  if (params.mediaType === 'image') {
+    items.push({ label: 'Копировать картинку', click: () => win.webContents.copyImageAt(params.x, params.y) });
+  }
+  if (/^https?:/i.test(params.linkURL)) {
+    items.push({ label: 'Копировать ссылку', click: () => clipboard.writeText(params.linkURL) });
+  }
+  if (params.isEditable) {
+    if (items.length) items.push({ type: 'separator' });
+    items.push(
+      { label: 'Вырезать', role: 'cut', enabled: flags.canCut },
+      { label: 'Копировать', role: 'copy', enabled: flags.canCopy },
+      { label: 'Вставить', role: 'paste', enabled: flags.canPaste },
+      { type: 'separator' },
+      { label: 'Выделить всё', role: 'selectAll', enabled: flags.canSelectAll },
+    );
+  } else if (params.selectionText.trim()) {
+    if (items.length) items.push({ type: 'separator' });
+    items.push({ label: 'Копировать', role: 'copy' });
+  }
+  if (items.length) Menu.buildFromTemplate(items).popup({ window: win });
+}
+
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
@@ -576,6 +607,11 @@ function createWindow(): BrowserWindow {
     title: profile ? `DuoStream (${profile})` : 'DuoStream',
     backgroundColor: '#0d0f13',
     autoHideMenuBar: true,
+    // Своя верхняя панель вместо системного заголовка (иначе «DuoStream» дважды): кнопки окна Windows
+    // рисуются поверх её правого края. Цвет и высота — как у .topbar (styles.css, --panel и --topbar-h)
+    titleBarStyle: 'hidden',
+    // На 1 px ниже панели — не перекрывать её нижнюю линию
+    titleBarOverlay: { color: '#151820', symbolColor: '#e7e9ee', height: TOPBAR_HEIGHT - 1 },
     // В собранном exe иконка и так вшита; при запуске из исходников без этого была бы иконка Electron
     icon: path.join(RENDERER_ROOT, 'img', 'icon-256.png'),
     webPreferences: {
@@ -603,6 +639,7 @@ function createWindow(): BrowserWindow {
   win.webContents.on('will-navigate', (event, url) => {
     if (!url.startsWith(`${APP_ORIGIN}/`)) event.preventDefault();
   });
+  win.webContents.on('context-menu', (_event, params) => showContextMenu(win, params));
   // F12 / Ctrl+Shift+I — инструменты разработчика (chrome://webrtc-internals недоступен, а консоль полезна)
   win.webContents.on('before-input-event', (_event, input) => {
     const devtools = input.key === 'F12' || (input.control && input.shift && input.key.toLowerCase() === 'i');

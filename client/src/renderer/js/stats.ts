@@ -54,6 +54,8 @@ export interface StatsSample {
     concealedPct: number | null;
     voiceConcealedPct: number | null;
     streamConcealedPct: number | null;
+    /** Звук трансляции: доля отсчётов, которые приёмник растянул или сжал (подгонка под джиттер-буфер — «плывёт») */
+    streamStretchPct: number | null;
   };
   lossPct: number | null;
   quality: Quality;
@@ -108,7 +110,7 @@ export class StatsMonitor {
           }
         : null,
       video: null,
-      audio: { outKbps: 0, inKbps: 0, inLossPct: null, concealedPct: null, voiceConcealedPct: null, streamConcealedPct: null },
+      audio: { outKbps: 0, inKbps: 0, inLossPct: null, concealedPct: null, voiceConcealedPct: null, streamConcealedPct: null, streamStretchPct: null },
       lossPct: null,
       quality: 'unknown',
     };
@@ -119,6 +121,7 @@ export class StatsMonitor {
     let audioConcealed = 0;
     const streamTrackId = this.session.systemT?.receiver.track?.id;
     const concealedBy = { voice: [0, 0], stream: [0, 0] }; // [досочинено, всего]
+    let streamStretched = 0;
     const fieldOf = (s: Stat, field: string) => delta(s, field) ?? 0;
     for (const s of byId.values()) {
       if (s.type === 'outbound-rtp' && s.kind === 'video' && (s.framesEncoded ?? 0) > 0) {
@@ -170,7 +173,9 @@ export class StatsMonitor {
         const concealed = Math.max(0, (delta(s, 'concealedSamples') ?? 0) - (delta(s, 'silentConcealedSamples') ?? 0));
         audioSamples += samples;
         audioConcealed += concealed;
-        const part = concealedBy[s.trackIdentifier && s.trackIdentifier === streamTrackId ? 'stream' : 'voice'];
+        const isStream = Boolean(s.trackIdentifier && s.trackIdentifier === streamTrackId);
+        if (isStream) streamStretched += fieldOf(s, 'insertedSamplesForDeceleration') + fieldOf(s, 'removedSamplesForAcceleration');
+        const part = concealedBy[isStream ? 'stream' : 'voice'];
         part[0] += concealed;
         part[1] += samples;
       }
@@ -178,7 +183,10 @@ export class StatsMonitor {
     if (audioReceived + audioLost > 0) result.audio.inLossPct = (audioLost / (audioReceived + audioLost)) * 100;
     if (audioSamples > 0) result.audio.concealedPct = (audioConcealed / audioSamples) * 100;
     if (concealedBy.voice[1] > 0) result.audio.voiceConcealedPct = (concealedBy.voice[0] / concealedBy.voice[1]) * 100;
-    if (concealedBy.stream[1] > 0) result.audio.streamConcealedPct = (concealedBy.stream[0] / concealedBy.stream[1]) * 100;
+    if (concealedBy.stream[1] > 0) {
+      result.audio.streamConcealedPct = (concealedBy.stream[0] / concealedBy.stream[1]) * 100;
+      result.audio.streamStretchPct = (streamStretched / concealedBy.stream[1]) * 100;
+    }
 
     result.lossPct = result.video?.lossPct ?? result.audio.inLossPct;
     result.quality = evaluate(result);
@@ -194,7 +202,10 @@ function evaluate(s: StatsSample): Quality {
   if (loss == null && rtt == null) return 'unknown';
   if ((loss ?? 0) >= 5 || (rtt ?? 0) >= 200) return 'poor';
   const limitation = s.video?.direction === 'out' ? s.video.limitation : '';
-  if ((loss ?? 0) >= 1 || (rtt ?? 0) >= 100 || ['bandwidth', 'cpu'].includes(limitation)) return 'fair';
+  // «Процессор/энкодер» при аппаратном кодировщике — ложная оценка WebRTC (см. checkFalseCpuLimit в app.ts),
+  // сеть при этом в порядке: качество связи из-за неё не снижаем
+  const cpuLimited = limitation === 'cpu' && s.video?.hw !== true;
+  if ((loss ?? 0) >= 1 || (rtt ?? 0) >= 100 || limitation === 'bandwidth' || cpuLimited) return 'fair';
   return 'good';
 }
 
@@ -288,7 +299,8 @@ export function describeStats(s: StatsSample, extra: Record<string, string> = {}
     `${formatKbps(s.audio.outKbps)} / ${formatKbps(s.audio.inKbps)}` +
       (parts.length
         ? ` · досочинено ${parts.map(([name, pct]) => `${name} ${pct.toFixed(1)}%`).join(', ')} (треск: пакеты опаздывают или не успевает процессор)`
-        : ''),
+        : '') +
+      ((s.audio.streamStretchPct ?? 0) >= 1 ? ` · трансляция растянута/сжата ${s.audio.streamStretchPct!.toFixed(1)}% (звук «плывёт»)` : ''),
   ]);
   for (const [k, val] of Object.entries(extra)) lines.push([k, val]);
   return lines;

@@ -22,12 +22,17 @@ export class Playback {
   private volume = 1;
   private muted = false;
 
-  constructor(element: HTMLAudioElement) {
+  /**
+   * @param latencyHint 'playback' — для звука трансляции: буферы больше, и под нагрузкой (декодирование 60 FPS)
+   * поток отрисовки звука не опустошает их — без треска; задержка в несколько десятков мс для фильма неважна.
+   * Голосу нужна малая задержка — 'interactive'
+   */
+  constructor(element: HTMLAudioElement, latencyHint: AudioContextLatencyCategory = 'interactive') {
     // Chromium не отдаёт звук удалённого WebRTC-трека в Web Audio, пока трек не подключён к медиаэлементу,
     // поэтому элемент остаётся (без звука), а слышно то, что идёт через граф
     this.element = element;
     this.element.muted = true;
-    this.ctx = new AudioContext({ latencyHint: 'interactive' });
+    this.ctx = new AudioContext({ latencyHint });
     this.gain = this.ctx.createGain();
     this.gain.connect(createLimiter(this.ctx)).connect(this.ctx.destination);
   }
@@ -80,7 +85,9 @@ export class SendGain {
 
   constructor(track: MediaStreamTrack) {
     this.input = track;
-    this.ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
+    // Буферы побольше: под нагрузкой (захват 60 FPS, кодировщик, шумодав) с малыми буферами поток Web Audio
+    // не успевал, и в звук трансляции попадали дыры — треск у зрителя
+    this.ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'playback' });
     this.gain = this.ctx.createGain();
     const dest = this.ctx.createMediaStreamDestination();
     dest.channelCount = 2;
@@ -93,6 +100,21 @@ export class SendGain {
   /** @param volume 1 = 100% */
   setVolume(volume: number): void {
     this.gain.gain.setTargetAtTime(volume, this.ctx.currentTime, 0.02);
+  }
+
+  /**
+   * Сколько звука потеряно с начала трансляции, мс: на захвате (Windows/Chromium не отдали вовремя) и после
+   * регулятора громкости (Web Audio не успел). Где растёт — там и треск у зрителя
+   */
+  lostMs(): { capture: number; mixer: number } | null {
+    type TrackStats = { totalFramesDuration: number; deliveredFramesDuration: number };
+    const lost = (t: MediaStreamTrack) => {
+      const st = (t as MediaStreamTrack & { stats?: TrackStats }).stats;
+      return st ? Math.max(0, st.totalFramesDuration - st.deliveredFramesDuration) : null;
+    };
+    const capture = lost(this.input);
+    const mixer = lost(this.track);
+    return capture === null || mixer === null ? null : { capture: Math.round(capture), mixer: Math.round(mixer) };
   }
 
   stop(): void {

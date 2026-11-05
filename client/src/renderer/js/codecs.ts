@@ -56,6 +56,42 @@ export async function probeVideoCodecs(names: CodecName[], video: Config['video'
   return results;
 }
 
+/**
+ * Зритель: какие кодеки этот ПК декодирует аппаратно (MediaCapabilities.decodingInfo → powerEfficient).
+ * AV1 аппаратно декодируют только сравнительно новые видеокарты (NVIDIA RTX 30+, AMD RX 6000+, Intel Arc /
+ * 11-го поколения); на остальных AV1 1440p60 декодирует процессор — тяжело. Стример это учитывает.
+ */
+export async function probeHardwareDecode(names: CodecName[] = ['AV1', 'H264', 'VP9']): Promise<CodecName[]> {
+  const hw: CodecName[] = [];
+  if (!navigator.mediaCapabilities?.decodingInfo) return hw;
+  for (const name of names) {
+    try {
+      const info = await navigator.mediaCapabilities.decodingInfo({
+        type: 'webrtc',
+        video: { contentType: MIME[name], width: 1920, height: 1080, framerate: 60, bitrate: 20_000_000 },
+      });
+      if (info.supported && info.powerEfficient) hw.push(name);
+    } catch {
+      // нет данных — считаем, что не аппаратно
+    }
+  }
+  return hw;
+}
+
+/**
+ * Стример: порядок кодеков с учётом зрителя — первыми те, что у стримера кодируются, а у зрителя декодируются
+ * аппаратно. Общего аппаратного нет — порядок стримера (кодировать процессором тяжелее, чем декодировать).
+ */
+export function preferPeerDecodable(order: CodecName[], probe: CodecProbe[] | null, peerHwDecode: CodecName[] | null): CodecName[] {
+  if (!peerHwDecode) return order;
+  // H.264 MediaCapabilities в Chromium 152 называет неаппаратным при любом профиле, хотя WebRTC кодирует его
+  // NVENC/AMF/QuickSync (замерено; аппаратный H.264 есть почти у любой видеокарты). Окажется программным —
+  // это заметит проверка по статистике (checkEncoder в app.ts) и перейдёт к следующему кодеку
+  const encodesInHardware = (c: CodecName) => c === 'H264' || probe?.find((p) => p.name === c)?.hardware === true;
+  const both = order.filter((c) => encodesInHardware(c) && peerHwDecode.includes(c));
+  return both.length ? [...both, ...order.filter((c) => !both.includes(c))] : order;
+}
+
 export function orderCodecs(probe: CodecProbe[], preferHardware: boolean): CodecName[] {
   const usable = probe.filter((p) => p.supported);
   const ordered = preferHardware
