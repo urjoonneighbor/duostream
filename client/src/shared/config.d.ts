@@ -86,5 +86,7 @@ export interface Config {
   app: {
     autoUpdate: boolean;
     overlay: { enabled: boolean; corner: OverlayCorner };
+    /** запись кадров для «Отметить глюк» и поиск кадров-выбросов (отладка, нагружает видеокарту) */
+    debugFrames: boolean;
   };
 }

@@ -85,7 +85,7 @@
         <div class="chat-list" id="chatList"></div>
         <form class="chat-form" id="chatForm">
           <button type="button" class="icon-btn" id="chatAttach" title="Отправить файлы любого размера (можно перетащить в окно или вставить скриншот Ctrl+V)" data-icon="clip"></button>
-          <textarea id="chatInput" rows="1" placeholder="Сообщение или Ctrl+V — скриншот" maxlength="20000"></textarea>
+          <textarea id="chatInput" rows="1" placeholder="Сообщение или Ctrl+V — скриншот"></textarea>
           <button type="submit" class="icon-btn primary" id="chatSend" title="Отправить" data-icon="send"></button>
           <input type="file" id="chatFile" multiple hidden />
         </form>
@@ -258,13 +258,17 @@
           <div class="row">
             <label class="field">
               <span>Битрейт, кбит/с (максимум)</span>
-              <input id="sBitrate" type="number" min="500" max="200000" step="500" />
+              <input id="sBitrate" type="number" min="500" max="200000" step="100" />
             </label>
             <label class="field">
               <span>Минимальный битрейт, кбит/с</span>
-              <input id="sMinBitrate" type="number" min="0" max="200000" step="500" />
+              <input id="sMinBitrate" type="number" min="0" max="200000" step="100" />
             </label>
           </div>
+          <p class="hint error" id="sBitrateHint" hidden>
+            Минимум почти равен максимуму: когда сеть не успевает, битрейт не может снизиться — видео подлагивает.
+            Обычно минимум ставят в 3–4 раза ниже максимума.
+          </p>
           <div class="row">
             <label class="field">
               <span>Кодеки по приоритету</span>
@@ -415,6 +419,7 @@
             <input id="sVoiceBuffer" type="number" min="0" max="500" step="10" />
           </label>
           <p class="hint">Сетевые настройки применяются при следующем подключении.</p>
+          <label class="check"><input type="checkbox" id="sDebugFrames" /><span>Отладка: кадры для поиска глюков картинки — кнопка «Отметить глюк» и поиск кадров-выбросов у зрителя (нагружает видеокарту, включайте только для разбора)</span></label>
           <label class="check"><input type="checkbox" id="sAutoUpdate" /><span>Проверять обновления на GitHub (установленная версия обновляется при выходе, portable — сообщает о новой версии)</span></label>
         </section>
 

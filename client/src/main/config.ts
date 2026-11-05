@@ -73,6 +73,9 @@ export const DEFAULTS: Readonly<Config> = Object.freeze<Config>({
   app: {
     autoUpdate: true, // проверять обновления на GitHub (src/main/updater.ts)
     overlay: { enabled: true, corner: 'top-left' }, // оверлей поверх игры (src/main/overlay.ts)
+    // Отладка: запись последних кадров («Отметить глюк») и поиск кадров-выбросов у зрителя — на каждом кадре,
+    // заметная нагрузка на видеокарту и ~300 МБ её памяти, поэтому по умолчанию выключено
+    debugFrames: false,
   },
 });
 
@@ -231,6 +234,7 @@ export function sanitize(input: unknown): Config {
   c.playback.streamBufferMs = clampInt(c.playback.streamBufferMs, 0, 2000, d.playback.streamBufferMs);
   c.playback.voiceBufferMs = clampInt(c.playback.voiceBufferMs, 0, 500, d.playback.voiceBufferMs);
   c.app.autoUpdate = bool(c.app.autoUpdate, d.app.autoUpdate);
+  c.app.debugFrames = bool(c.app.debugFrames, d.app.debugFrames);
   c.app.overlay = {
     enabled: bool(c.app.overlay.enabled, d.app.overlay.enabled),
     corner: oneOf(c.app.overlay.corner, ['top-left', 'top-right', 'bottom-left', 'bottom-right'], d.app.overlay.corner),

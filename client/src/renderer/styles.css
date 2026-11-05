@@ -11,6 +11,7 @@
   --fair: #f0b429;
   --poor: #f2555a;
   --radius: 10px;
+  --topbar-h: 48px; /* = TOPBAR_HEIGHT в main.ts: под неё рисуются кнопки окна Windows */
   color-scheme: dark;
   font-family: 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
@@ -135,14 +136,23 @@ textarea {
 }
 
 /* ---------- верхняя панель ---------- */
+/* Панель — заголовок окна: за неё окно перетаскивается, справа поверх неё кнопки окна Windows
+   (titlebar-area — свободная от них часть). Кнопки и прочее интерактивное — не для перетаскивания */
 .topbar {
   display: flex;
   align-items: center;
   gap: 12px;
   min-width: 0;
-  padding: 10px 16px;
+  height: var(--topbar-h);
+  padding: 0 16px;
+  padding-right: calc(16px + 100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw));
   border-bottom: 1px solid var(--line);
   background: var(--panel);
+  app-region: drag;
+}
+.topbar button,
+.topbar .peer-chip {
+  app-region: no-drag;
 }
 .brand {
   display: flex;

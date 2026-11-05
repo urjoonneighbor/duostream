@@ -27,6 +27,12 @@ export function formatBytes(n: number): string {
 
 const time = (ts: number) => new Date(ts).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
+/** Длиннее — сообщение отправляется файлом .txt */
+const LONG_TEXT_CHARS = 2000;
+
+/** Метка времени для имени файла: 2026-10-27 22-45-10 */
+const fileStamp = () => new Date().toLocaleString('sv-SE').replace(/:/g, '-');
+
 export class ChatPanel {
   private readonly chat: Chat;
   private readonly peerName: () => string;
@@ -91,10 +97,20 @@ export class ChatPanel {
     }
   }
 
+  /** Длинный текст (лог, код) уходит файлом .txt — в ленте он нечитаем, а сообщение ограничено 20 000 символов */
   private sendInput(): void {
     const input = $<HTMLTextAreaElement>('#chatInput');
-    if (!input.value.trim()) return;
-    this.chat.sendText(input.value);
+    const text = input.value.trim();
+    if (!text) return;
+    if (text.length > LONG_TEXT_CHARS) {
+      if (!this.canSend()) {
+        toast('Длинный текст уйдёт файлом — его можно отправить, когда собеседник подключён', 'warn');
+        return;
+      }
+      this.sendFiles([new File([text], `Сообщение ${fileStamp()}.txt`, { type: 'text/plain' })]);
+    } else {
+      this.chat.sendText(text);
+    }
     input.value = '';
   }
 
@@ -148,7 +164,7 @@ export class ChatPanel {
       if (!files.length) return;
       if ((e.target as Element | null)?.closest?.('dialog')) return;
       e.preventDefault();
-      const stamp = new Date().toLocaleString('sv-SE').replace(/:/g, '-'); // 2026-10-27 22-45-10
+      const stamp = fileStamp();
       this.sendFiles(
         files.map((f, i) =>
           f.type.startsWith('image/') && /^image\.\w+$/i.test(f.name)

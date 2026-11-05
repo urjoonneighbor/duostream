@@ -52,6 +52,7 @@ export class SettingsDialog {
 
     $('#btnSettingsCancel').addEventListener('click', () => this.dialog.close());
     for (const id of ['#sDenoise', '#sDenoiseModel']) $(id).addEventListener('change', () => this.updateDenoiseFields());
+    for (const id of ['#sBitrate', '#sMinBitrate']) $(id).addEventListener('change', () => this.normalizeBitrate(id));
     $<HTMLInputElement>('#sAllowedIps').addEventListener('input', () => this.updateAllowViewer());
     $('#btnAllowViewer').addEventListener('click', () => {
       $<HTMLInputElement>('#sAllowedIps').value = [...this.allowedIpsInput(), this.viewerIp ?? ''].join('\n');
@@ -112,6 +113,7 @@ export class SettingsDialog {
     setSelect($<HTMLSelectElement>('#sFps'), String(v.frameRate), `${v.frameRate} FPS`);
     $<HTMLInputElement>('#sBitrate').value = String(v.bitrateKbps);
     $<HTMLInputElement>('#sMinBitrate').value = String(v.minBitrateKbps);
+    this.updateBitrateHint();
     setSelect($<HTMLSelectElement>('#sCodecs'), v.codecs.join(','), v.codecs.join(' → '));
     setSelect($<HTMLSelectElement>('#sContentHint'), v.contentHint);
     setSelect($<HTMLSelectElement>('#sDegradation'), v.degradationPreference);
@@ -152,6 +154,7 @@ export class SettingsDialog {
     $<HTMLInputElement>('#sJitter').value = String(p.streamBufferMs);
     $<HTMLInputElement>('#sVoiceBuffer').value = String(p.voiceBufferMs);
     $<HTMLInputElement>('#sAutoUpdate').checked = this.cfg.app.autoUpdate;
+    $<HTMLInputElement>('#sDebugFrames').checked = this.cfg.app.debugFrames;
     $<HTMLInputElement>('#sOverlay').checked = this.cfg.app.overlay.enabled;
     setSelect($<HTMLSelectElement>('#sOverlayCorner'), this.cfg.app.overlay.corner);
 
@@ -274,6 +277,35 @@ export class SettingsDialog {
     }
   }
 
+  /**
+   * Битрейт подравнивается сразу при вводе: до сотни и в пределы. Иначе число вроде 12345 не проходило
+   * проверку формы, и «Сохранить» молча не срабатывало (подсказка браузера могла быть на другой вкладке).
+   * Минимум выше максимума — максимум тянется за минимумом (меняли минимум) или минимум за максимумом.
+   */
+  private normalizeBitrate(changed: string): void {
+    const maxInput = $<HTMLInputElement>('#sBitrate');
+    const minInput = $<HTMLInputElement>('#sMinBitrate');
+    const fix = (input: HTMLInputElement, fallback: number) => {
+      const n = Number(input.value);
+      const value = Number.isFinite(n) && input.value !== '' ? Math.round(n / 100) * 100 : fallback;
+      input.value = String(Math.min(Number(input.max), Math.max(Number(input.min), value)));
+    };
+    fix(maxInput, this.cfg.video.bitrateKbps);
+    fix(minInput, this.cfg.video.minBitrateKbps);
+    if (Number(minInput.value) > Number(maxInput.value)) {
+      if (changed === '#sMinBitrate') maxInput.value = minInput.value;
+      else minInput.value = maxInput.value;
+    }
+    this.updateBitrateHint();
+  }
+
+  /** Минимум ≥ 80 % максимума — битрейту некуда снижаться при перегрузке сети */
+  private updateBitrateHint(): void {
+    const max = Number($<HTMLInputElement>('#sBitrate').value);
+    const min = Number($<HTMLInputElement>('#sMinBitrate').value);
+    $('#sBitrateHint').hidden = !(max > 0 && min >= max * 0.8);
+  }
+
   private read(): Config {
     const cfg = structuredClone(this.cfg);
     const [width, height] = $<HTMLInputElement>('#sResolution').value.split('x').map(Number);
@@ -326,6 +358,7 @@ export class SettingsDialog {
     cfg.playback.streamBufferMs = num('#sJitter');
     cfg.playback.voiceBufferMs = num('#sVoiceBuffer');
     cfg.app.autoUpdate = $<HTMLInputElement>('#sAutoUpdate').checked;
+    cfg.app.debugFrames = $<HTMLInputElement>('#sDebugFrames').checked;
     cfg.app.overlay = { enabled: $<HTMLInputElement>('#sOverlay').checked, corner: $<HTMLInputElement>('#sOverlayCorner').value as Config['app']['overlay']['corner'] };
     return cfg;
   }

@@ -3,7 +3,7 @@
 import { SignalingClient, type PeerInfo, type Signal, type SignalingEvents } from './signaling.ts';
 import { PeerSession, type OfferSignal, type PeerEvents } from './peer.ts';
 import { MicPipeline, DENOISE_MODELS, type DenoiseState } from './audio.ts';
-import { probeVideoCodecs, orderCodecs, type CodecProbe } from './codecs.ts';
+import { probeVideoCodecs, orderCodecs, probeHardwareDecode, preferPeerDecodable, type CodecProbe } from './codecs.ts';
 import { StatsMonitor, describeStats, describeIce, formatKbps, formatPath, type Row, type StatsSample } from './stats.ts';
 import { openSourcePicker, type SourcePick } from './picker.ts';
 import { NativeCaptureTrack, nativeCaptureStatus } from './native-capture.ts';
@@ -97,6 +97,8 @@ interface AppState {
   /** Второй участник по данным сервера */
   peer: PeerInfo | null;
   peerPresence: { mic: MicPresence; deafened: boolean } | null;
+  /** Стример: какие кодеки зритель декодирует аппаратно (сигнал decode-caps); null — неизвестно */
+  peerHwDecode: CodecName[] | null;
   presenceSent: string | null;
   session: PeerSession | null;
   monitor: StatsMonitor | null;
@@ -172,6 +174,7 @@ const state: AppState = {
   sigInfo: '',
   peer: null,
   peerPresence: null,
+  peerHwDecode: null,
   presenceSent: null,
   session: null,
   monitor: null,
@@ -474,7 +477,10 @@ function onServerError({ code, message }: SignalingEvents['server-error']): void
 function onPeerPresent() {
   state.presenceSent = null; // собеседник (пере)подключился — сообщаем ему своё состояние заново
   sendPresence();
-  if (state.role !== 'streamer') return; // зритель ждёт offer
+  if (state.role !== 'streamer') {
+    void sendDecodeCaps();
+    return; // зритель ждёт offer
+  }
   startStreamerSession().catch((err: Error) => toast(`Ошибка WebRTC: ${err.message}`, 'error'));
 }
 
@@ -483,6 +489,7 @@ function onPeerLeft() {
   uiCue('leave');
   state.peer = null;
   state.peerPresence = null;
+  state.peerHwDecode = null;
   void closeSession();
   render();
 }
@@ -502,6 +509,7 @@ function teardown(): void {
   state.signaling = null;
   state.peer = null;
   state.peerPresence = null;
+  state.peerHwDecode = null;
   signaling?.close();
   // Встроенный сервер живёт, пока стример подключён
   if (state.hostedServer?.own) void window.duo.server.stop();
@@ -556,7 +564,7 @@ async function startStreamerSession(): Promise<void> {
   void closeSession();
   const session = createSession('streamer');
   await session.startAsStreamer({
-    codecOrder: state.codecOrder,
+    codecOrder: sessionCodecOrder(),
     screenStream: state.screen,
     scaleDownBy: state.capture?.scale ?? 1,
   });
@@ -586,6 +594,13 @@ function closeSession({ bye = false } = {}): Promise<unknown> {
 async function handleSignal(msg: Signal): Promise<void> {
   if (msg.kind === 'glitch-mark') {
     void markGlitch(false);
+    return;
+  }
+  if (msg.kind === 'decode-caps') {
+    const names = Array.isArray(msg.hw) ? msg.hw.filter((c): c is CodecName => ['AV1', 'H264', 'VP9', 'VP8'].includes(String(c))) : [];
+    state.peerHwDecode = names;
+    console.log(`[codecs] собеседник декодирует аппаратно: ${names.length ? names.join(', ') : 'ничего'}`);
+    applyPeerCodecOrder();
     return;
   }
   if (msg.kind === 'presence') {
@@ -665,18 +680,32 @@ function onPeerState(session: PeerSession, pcState: RTCPeerConnectionState): voi
 function onRemoteTrack({ kind, stream, track }: PeerEvents['track']): void {
   if (kind === 'video') {
     state.remoteVideo = stream;
-    state.recorder.attach(track);
+    syncDebugFrames();
     track.addEventListener('unmute', render);
-    if (!state.glitches) {
-      state.glitches = new GlitchDetector($<HTMLVideoElement>('#video'), onGlitch);
-      state.glitches.start();
-    }
   } else {
     const playback = kind === 'system' ? state.playback.system : state.playback.voice;
     playback.attach(stream);
     void applySink(playback);
   }
   render();
+}
+
+/**
+ * Отладочные инструменты кадров (настройка app.debugFrames): запись последних кадров для «Отметить глюк»
+ * (у стримера — захваченных, у зрителя — декодированных) и поиск кадров-выбросов у зрителя. Оба работают на
+ * каждом кадре: копия в памяти видеокарты и чтение кадра с неё — на слабом ПК это заметно, поэтому только по запросу.
+ */
+function syncDebugFrames(): void {
+  const on = state.cfg.app.debugFrames;
+  const track = state.role === 'streamer' ? state.screen?.getVideoTracks()[0] : state.remoteVideo?.getVideoTracks()[0];
+  state.recorder.attach(on ? (track ?? null) : null);
+  if (on && state.role !== 'streamer' && state.remoteVideo && !state.glitches) {
+    state.glitches = new GlitchDetector($<HTMLVideoElement>('#video'), onGlitch);
+    state.glitches.start();
+  } else if (!on && state.glitches) {
+    state.glitches.stop();
+    state.glitches = null;
+  }
 }
 
 /**
@@ -687,6 +716,11 @@ function onRemoteTrack({ kind, stream, track }: PeerEvents['track']): void {
 async function markGlitch(local: boolean): Promise<void> {
   if (local && state.peer) void state.signaling?.sendSignal({ kind: 'glitch-mark' });
   if (state.glitchMarking) return;
+  if (!state.cfg.app.debugFrames) {
+    if (local) toast('Отметка глюка: включите в настройках «Отладка: кадры для поиска глюков»', 'warn', 8000);
+    else console.warn('[glitch] собеседник отметил глюк, но запись кадров здесь выключена (настройка «Отладка: кадры»)');
+    return;
+  }
   const who = local ? 'вы' : state.peer?.name ?? 'собеседник';
   if (!state.recorder.frames.length) {
     console.warn(`[glitch] отметка (${who}): кадров нет — видео не идёт`);
@@ -983,7 +1017,7 @@ async function beginCapture(pick: SourcePick, options?: { forceChromium?: boolea
   if (audioTrack) {
     // Звук трансляции — через регулятор громкости (ползунок «Стрим» у стримера)
     capture.sendGain = new SendGain(audioTrack);
-    capture.sendGain.setVolume(Number($<HTMLInputElement>('#streamSendVolume').value) / 100);
+    capture.sendGain.setVolume(sliderGain(Number($<HTMLInputElement>('#streamSendVolume').value) / 100));
     stream.removeTrack(audioTrack);
     stream.addTrack(capture.sendGain.track);
   }
@@ -998,7 +1032,7 @@ async function beginCapture(pick: SourcePick, options?: { forceChromium?: boolea
 
   const previous = { stream: state.screen, capture: state.capture };
   Object.assign(state, { screen: stream, capture, sourceName: pick.source.name, lastPick: pick, lastEncoderRestart: 0, nativeStats: null });
-  state.recorder.attach(stream.getVideoTracks()[0] ?? null);
+  syncDebugFrames();
   stopCapture(previous.stream, previous.capture);
 
   const width = Math.round(capture.width / capture.scale);
@@ -1017,6 +1051,7 @@ async function beginCapture(pick: SourcePick, options?: { forceChromium?: boolea
   // Потолок «картинка замерла» относился к прежнему источнику
   rampTimers.forEach(clearTimeout);
   rampTimers = [];
+  pictureStatic = false;
   void state.session?.setBitrateCap(null);
 
   const engine = capture.engine === 'native' ? 'собственный захват' : 'захват Chromium';
@@ -1042,27 +1077,82 @@ const RESUME_RAMP: [number, number][] = [
   [1800, 1],
 ];
 let rampTimers: number[] = [];
+let pictureStatic = false; // сейчас действует ограничение «картинка замерла»
+let pictureResumedAt = 0; // когда картинка последний раз «ожила» (performance.now())
 
-function onCaptureActivity(active: boolean): void {
-  rampTimers.forEach(clearTimeout);
-  rampTimers = [];
+/**
+ * @param active картинка меняется (true) или замерла (false)
+ * @param by кто заметил: процесс захвата (нет новых кадров от Windows) или кодировщик (почти не отдаёт данных)
+ */
+function onCaptureActivity(active: boolean, by: 'capture' | 'encoder' = 'capture'): void {
   const session = state.session;
   if (!session || state.role !== 'streamer') return;
+  if (active !== pictureStatic) return; // уже в этом состоянии (оба признака срабатывают по очереди)
+  rampTimers.forEach(clearTimeout);
+  rampTimers = [];
+  // Отсчёт «кодировщик молчит» начинается заново: иначе после движения, замеченного процессом захвата,
+  // кодировщик сразу же объявлял паузу по старому отсчёту — ограничение включалось и выключалось каждую секунду
+  if (staticProbe) staticProbe.lowSince = null;
   const max = state.cfg.video.bitrateKbps;
+  // При небольшом максимуме (8 Мбит/с) 6 Мбит/с почти не ограничивают — тогда половина максимума
+  const cap = Math.min(STATIC_CAP_KBPS, Math.round(max / 2));
+  const source = by === 'encoder' ? ' (по кодировщику)' : '';
   if (!active) {
-    console.log(`[encoder] картинка замерла — битрейт до ${formatKbps(Math.min(max, STATIC_CAP_KBPS))}`);
-    void session.setBitrateCap(Math.min(max, STATIC_CAP_KBPS));
+    pictureStatic = true;
+    console.log(`[encoder] картинка замерла${source} — битрейт до ${formatKbps(cap)}`);
+    void session.setBitrateCap(cap);
     return;
   }
+  pictureStatic = false;
+  pictureResumedAt = performance.now();
   if (session.bitrateCapKbps === null) return;
-  console.log('[encoder] картинка снова меняется — битрейт поднимается за 1,8 с');
+  console.log(`[encoder] картинка снова меняется${source} — битрейт поднимается за 1,8 с`);
   for (const [ms, share] of RESUME_RAMP) {
     rampTimers.push(
       window.setTimeout(() => {
         if (state.session !== session) return;
-        void session.setBitrateCap(share >= 1 ? null : Math.max(STATIC_CAP_KBPS, Math.round(max * share)));
+        void session.setBitrateCap(share >= 1 ? null : Math.max(cap, Math.round(max * share)));
       }, ms),
     );
+  }
+}
+
+/**
+ * Пауза по кодировщику. Процесс захвата замечает паузу, только когда окно совсем перестало перерисовываться,
+ * а плеер на паузе ещё секунды рисует панель, её исчезновение, курсор — ограничение запаздывало (замерено:
+ * 6 с), и кодировщик успевал опустить квантизатор. Кодировщик же на неподвижной картинке почти сразу
+ * перестаёт отдавать данные: меньше 4 % максимума дольше секунды — пауза; больше половины ограничения — движение.
+ * Работает и для захвата Chromium, где событий от процесса захвата нет.
+ */
+const STATIC_CHECK_MS = 500;
+const STATIC_AFTER_MS = 1000;
+const RESUME_GRACE_MS = 3000; // после «ожила» битрейт поднимается ступенями — пока не судим, замерла ли снова
+let staticProbe: { sender: RTCRtpSender; bytes: number; at: number; lowSince: number | null } | null = null;
+
+async function checkEncoderActivity(): Promise<void> {
+  const session = state.session;
+  const sender = session?.videoT?.sender;
+  if (!session || state.role !== 'streamer' || !state.screen || !sender?.track) {
+    staticProbe = null;
+    return;
+  }
+  let bytes = 0;
+  (await sender.getStats()).forEach((s: { type: string; kind?: string; bytesSent?: number }) => {
+    if (s.type === 'outbound-rtp' && s.kind === 'video') bytes += s.bytesSent ?? 0;
+  });
+  const now = performance.now();
+  const prev = staticProbe;
+  staticProbe = { sender, bytes, at: now, lowSince: prev?.sender === sender ? prev.lowSince : null };
+  if (!prev || prev.sender !== sender || now <= prev.at) return;
+  const kbps = ((bytes - prev.bytes) * 8) / (now - prev.at);
+  const max = state.cfg.video.bitrateKbps;
+  if (!pictureStatic) {
+    if (kbps >= Math.max(300, max * 0.04) || now - pictureResumedAt < RESUME_GRACE_MS) staticProbe.lowSince = null;
+    else if (staticProbe.lowSince === null) staticProbe.lowSince = now;
+    else if (now - staticProbe.lowSince >= STATIC_AFTER_MS) onCaptureActivity(false, 'encoder');
+  } else if (kbps > Math.max(1000, (session.bitrateCapKbps ?? max) * 0.5)) {
+    staticProbe.lowSince = null;
+    onCaptureActivity(true, 'encoder');
   }
 }
 
@@ -1129,15 +1219,18 @@ function scheduleGrowthCheck(capture: Capture): void {
  */
 async function restartVideoEncoder(reason: string): Promise<void> {
   const session = state.session;
-  if (!session || !state.capture) return;
+  const capture = state.capture;
+  if (!session || !capture) return;
   state.lastEncoderRestart = Date.now();
   console.log(`[encoder] пересоздаю видеоэнкодер (${reason}) без переподключения`);
   await session.resetVideoEncoder();
-  const area = Math.round(state.capture.width / state.capture.scale) * Math.round(state.capture.height / state.capture.scale);
+  // Пока энкодер пересоздавался, трансляцию могли остановить или сменить источник
+  if (state.session !== session || state.capture !== capture) return;
+  const area = Math.round(capture.width / capture.scale) * Math.round(capture.height / capture.scale);
   session.maxFrameArea = area; // новый энкодер создан под текущий кадр
-  state.capture.lastArea = area;
+  capture.lastArea = area;
   await sleep(3000);
-  if (state.session !== session) return;
+  if (state.session !== session || state.capture !== capture) return;
   const stats = await state.monitor?.sample().catch(() => null);
   const v = stats?.video;
   console.log(`[encoder] после пересоздания: ${v ? `${v.codec} ${v.impl} ${v.width}×${v.height}` : 'нет статистики'}`);
@@ -1179,7 +1272,13 @@ function sendStreamState(): void {
 function captureSummary(): string {
   const c = state.capture;
   if (!c) return '—';
-  if (c.engine === 'chromium') return 'Chromium (getDisplayMedia)';
+  // Звук окна: провалы — дыры в звуке (треск у зрителя), срезано — выброшено из-за завала доставки
+  const a = c.appAudio?.stats;
+  const appAudio = a ? ` · звук окна: провалов ${a.underruns}, срезано ${a.trimmedMs} мс, запас ${a.bufferedMs} мс` : '';
+  // Звук трансляции: потери на захвате и после регулятора громкости — где растёт, там и треск
+  const lost = c.sendGain?.lostMs();
+  const sendAudio = lost ? ` · звук трансляции потерян: на захвате ${lost.capture} мс, на регуляторе ${lost.mixer} мс` : '';
+  if (c.engine === 'chromium') return `Chromium (getDisplayMedia)${appAudio}${sendAudio}`;
   const s = state.nativeStats;
   // Где стоят кадры, если текстуры кончаются: доставка в окно (занят интерфейс) или запись в трек (энкодер)
   const ms = (avg: number, max: number) => `${avg.toFixed(1)} мс (макс ${max.toFixed(0)})`;
@@ -1187,7 +1286,7 @@ function captureSummary(): string {
     ? ` · ${s.fps.toFixed(0)} к/с, копирование ${s.copyMs.toFixed(2)} мс, пропущено ${s.dropped}, текстур в работе ${s.inFlight}` +
       `, доставка в окно ${ms(s.deliverMs ?? 0, s.deliverMaxMs ?? 0)}, запись в трек ${ms(s.write.avgMs, s.write.maxMs)}`
     : '';
-  return `собственный (WGC)${perf}`;
+  return `собственный (WGC)${perf}${appAudio}${sendAudio}`;
 }
 
 // ======================= кодеки =======================
@@ -1298,6 +1397,34 @@ function micPresence(): MicPresence {
   if (!state.mic) return 'none';
   if (state.micMuted || state.deafened) return 'off';
   return pushToTalk() ? 'ptt' : 'on';
+}
+
+/** Зритель: какие кодеки декодируем аппаратно — стример выберет кодек, аппаратный с обеих сторон */
+let hwDecodeProbe: Promise<CodecName[]> | null = null;
+
+async function sendDecodeCaps(): Promise<void> {
+  hwDecodeProbe ??= probeHardwareDecode();
+  const hw = await hwDecodeProbe;
+  if (state.signaling?.state !== 'open' || !state.peer || state.role === 'streamer') return;
+  console.log(`[codecs] аппаратно декодирую: ${hw.length ? hw.join(', ') : 'ничего'}`);
+  void state.signaling.sendSignal({ kind: 'decode-caps', hw });
+}
+
+/** Стример: порядок кодеков для сессии — свой (аппаратные для кодирования), с учётом декодирования у зрителя */
+function sessionCodecOrder(): CodecName[] {
+  return preferPeerDecodable(state.codecOrder, state.probe, state.peerHwDecode);
+}
+
+/** Стример: зритель сообщил, что декодирует аппаратно, — сменить кодек, если общий аппаратный другой */
+function applyPeerCodecOrder(): void {
+  const session = state.session;
+  if (state.role !== 'streamer' || !session) return;
+  const order = sessionCodecOrder();
+  if (!order.length || order[0] === session.codecOrder[0]) return;
+  console.log(`[codecs] ${session.codecOrder[0] ?? '?'} у зрителя декодируется не аппаратно — перехожу на ${order[0]} (${order.join(' → ')})`);
+  session.triedCodecs.clear();
+  session.hwSearchDone = false;
+  session.switchCodecs(order).catch((err: Error) => toast(`Не удалось сменить кодек: ${err.message}`, 'error'));
 }
 
 /** Сообщаем собеседнику, выключен ли у нас микрофон и звук (сигнальным сообщением — сессия не нужна) */
@@ -1533,7 +1660,58 @@ async function tickStats(): Promise<void> {
   if (state.role === 'streamer') {
     if (stats.video?.direction === 'out') state.session?.noteEncodedFrame(stats.video.width, stats.video.height);
     checkEncoder(stats);
+    checkBitrateFloor(stats);
+    checkFalseCpuLimit(stats);
   }
+}
+
+/**
+ * «Ограничение качества: процессор/энкодер» при аппаратном кодировщике. WebRTC меряет время кодирования
+ * кадра и при занятой видеокарте (фильм в плеере, захват 60 FPS) решает, что кодировщик не успевает, —
+ * и с «держать FPS» урезает разрешение вплоть до 360p. Возврат размера сбрасывает NVENC на процессор,
+ * и начинается круг. Для аппаратного кодировщика такая оценка почти всегда ложная: на этот сеанс —
+ * «держать разрешение» (при нехватке снижается FPS, размер кадра не меняется).
+ */
+const FALSE_CPU_SAMPLES = 5;
+let cpuLimitStrikes = 0;
+
+function checkFalseCpuLimit(stats: StatsSample): void {
+  const session = state.session;
+  const v = stats.video;
+  if (!session || session.degradationOverride || state.cfg.video.degradationPreference === 'maintain-resolution' || v?.direction !== 'out') return;
+  cpuLimitStrikes = v.hw === true && v.limitation === 'cpu' ? cpuLimitStrikes + 1 : 0;
+  if (cpuLimitStrikes < FALSE_CPU_SAMPLES) return;
+  cpuLimitStrikes = 0;
+  session.degradationOverride = 'maintain-resolution';
+  console.warn(`[encoder] WebRTC урезает разрешение (${v.width}×${v.height}) из-за «процессор/энкодер» при аппаратном кодировщике — на этот сеанс «держать разрешение»`);
+  void session.updateConfig(state.cfg);
+}
+
+/**
+ * Канал не тянет минимальный битрейт из настроек: оценка полосы упёрлась в минимум, а потери держатся.
+ * Ниже минимума WebRTC не опускается и продолжает забивать канал — вместе с видео тонут голос и звук
+ * трансляции (у зрителя треск). Нижняя граница снимается до конца сеанса, стример получает подсказку.
+ */
+const FLOOR_RELIEF_KBPS = 1500;
+let floorStrikes = 0;
+
+function checkBitrateFloor(stats: StatsSample): void {
+  const session = state.session;
+  const min = state.cfg.video.minBitrateKbps;
+  if (!session || session.minBitrateFloorKbps !== null || min <= FLOOR_RELIEF_KBPS || stats.video?.direction !== 'out') return;
+  const atFloor = stats.availableOutKbps !== null && stats.availableOutKbps <= min * 1.1;
+  floorStrikes = atFloor && (stats.lossPct ?? 0) >= 3 ? floorStrikes + 1 : Math.max(0, floorStrikes - 1);
+  if (floorStrikes < 3) return;
+  floorStrikes = 0;
+  session.minBitrateFloorKbps = FLOOR_RELIEF_KBPS;
+  console.warn(`[network] канал не тянет минимальный битрейт ${formatKbps(min)} (потери ${(stats.lossPct ?? 0).toFixed(1)} %) — нижняя граница снята до конца сеанса`);
+  toast(
+    `Канал не тянет минимальный битрейт ${formatKbps(min)}: пакеты теряются, у зрителя рвутся звук и видео. ` +
+      'Нижняя граница снята до конца сеанса; поставьте минимальный битрейт ниже в настройках (например, 3000).',
+    'warn',
+    15000,
+  );
+  void session.negotiate(); // x-google-min-bitrate меняется только через SDP
 }
 
 /**
@@ -1614,10 +1792,29 @@ function renderQuality(stats: StatsSample | null): void {
 
 // ======================= настройки и диагностика =======================
 
+/** Что поменялось при сохранении — в журнал (по нему видно, что человек менял и что сохранилось). Пароли — нет */
+function logConfigChanges(prev: Config, next: Config): void {
+  const SECRET = /password|credential/i;
+  const changes: string[] = [];
+  const walk = (a: unknown, b: unknown, path: string) => {
+    if (a && b && typeof a === 'object' && typeof b === 'object' && !Array.isArray(a) && !Array.isArray(b)) {
+      for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+        walk((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], path ? `${path}.${key}` : key);
+      }
+    } else if (JSON.stringify(a) !== JSON.stringify(b)) {
+      changes.push(SECRET.test(path) ? `${path} изменён` : `${path}: ${JSON.stringify(a)} → ${JSON.stringify(b)}`);
+    }
+  };
+  walk(prev, next, '');
+  console.log(`[settings] ${changes.length ? changes.join('; ') : 'без изменений'}`);
+}
+
 async function saveSettings(next: Config, { notice = 'Настройки сохранены' } = {}): Promise<void> {
   const prev = state.cfg;
   state.cfg = await window.duo.saveConfig(next);
   const cfg = state.cfg;
+  logConfigChanges(prev, cfg);
+  if (prev.app.debugFrames !== cfg.app.debugFrames) syncDebugFrames();
 
   if (state.mic) await state.mic.reconfigure(cfg.audio).catch((err: Error) => toast(`Микрофон: ${err.message}`, 'error'));
   // Список разрешённых IP встроенный сервер принимает на лету, без переподключения
@@ -1669,7 +1866,7 @@ async function saveSettings(next: Config, { notice = 'Настройки сох�
     if (state.role === 'streamer' && codecsChanged) {
       session.triedCodecs.clear();
       session.hwSearchDone = false;
-      await session.switchCodecs(state.codecOrder);
+      await session.switchCodecs(sessionCodecOrder());
     } else if (state.role === 'streamer' && bitrateChanged) {
       await session.negotiate(); // x-google-min/start-bitrate меняются только через SDP
     }
@@ -1863,7 +2060,7 @@ function render(): void {
   $('#streamVolumeWrap').hidden = streamer;
   $('#streamSendWrap').hidden = !streamer;
   // Отметка глюка — когда есть собеседник и идёт видео (у кого-то из двоих)
-  $('#btnMarkGlitch').hidden = !state.peer || !(state.screen || state.remote?.live);
+  $('#btnMarkGlitch').hidden = !state.cfg.app.debugFrames || !state.peer || !(state.screen || state.remote?.live);
   chatPanel?.setAvailable(Boolean(state.peer));
 }
 
@@ -1913,6 +2110,13 @@ function setupFullscreenIdle(): void {
   });
 }
 
+/**
+ * Ползунок → усиление по слуху. Громкость слышится логарифмически, а усиление было пропорционально ползунку:
+ * половина ползунка давала лишь −6 дБ, и регулировка казалась слабой. Квадрат: 50 % — −12 дБ,
+ * 25 % — −24 дБ, 200 % — +12 дБ (громкие места при усилении мягко прижимает лимитер).
+ */
+const sliderGain = (fraction: number) => fraction * fraction;
+
 /** Ползунки громкости (в процентах, выше 100 — усиление) и их запомненные значения */
 function restoreVolumes(): void {
   const sliders: [string, string, (v: number) => void][] = [
@@ -1930,7 +2134,7 @@ function restoreVolumes(): void {
       // хранилище недоступно — оставляем значение по умолчанию
     }
     const update = () => {
-      apply(Number(input.value) / 100);
+      apply(sliderGain(Number(input.value) / 100));
       input.closest('label')!.title = `${title}: ${input.value}%`;
     };
     update();
@@ -2009,6 +2213,7 @@ async function init(): Promise<void> {
   state.role = config.signaling.role;
   if (error) toast(error, 'error', 12000);
   state.nativeStatus = await nativeCaptureStatus();
+  setInterval(() => void checkEncoderActivity().catch(() => {}), STATIC_CHECK_MS);
   state.activeRenderer = (await window.duo.getAppInfo().catch(() => null))?.activeRenderer ?? 'd3d11';
   if (!state.nativeStatus.available) console.warn('[capture] собственный захват недоступен:', state.nativeStatus.reason);
   window.duo.nativeCapture.onEvent(onNativeEvent);
@@ -2020,7 +2225,7 @@ async function init(): Promise<void> {
   });
   fillConnectForm();
   bindEvents();
-  state.playback = { voice: new Playback($<HTMLAudioElement>('#voiceAudio')), system: new Playback($<HTMLAudioElement>('#systemAudio')) };
+  state.playback = { voice: new Playback($<HTMLAudioElement>('#voiceAudio')), system: new Playback($<HTMLAudioElement>('#systemAudio'), 'playback') };
   restoreVolumes();
   void refreshOutputs();
   render();

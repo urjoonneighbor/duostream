@@ -144,6 +144,16 @@ export class PeerSession extends Emitter<PeerEvents> {
   voiceT: RTCRtpTransceiver | null = null;
   videoT: RTCRtpTransceiver | null = null;
   systemT: RTCRtpTransceiver | null = null;
+  /**
+   * Нижняя граница оценщика полосы, снятая на этот сеанс (кбит/с): канал не тянул минимальный битрейт
+   * из настроек — WebRTC не мог уступить и забивал канал, а вместе с видео тонули голос и звук (треск)
+   */
+  minBitrateFloorKbps: number | null = null;
+  /**
+   * «Держать разрешение» на этот сеанс вместо настройки: WebRTC ложно решил, что аппаратный кодировщик
+   * не успевает, и урезал разрешение (вплоть до 360p), а при возврате размера NVENC сваливался на процессор
+   */
+  degradationOverride: DegradationPreference | null = null;
   chatChannel: RTCDataChannel | null = null;
   fileChannel: RTCDataChannel | null = null;
 
@@ -249,7 +259,11 @@ export class PeerSession extends Emitter<PeerEvents> {
 
   async handleAnswer(msg: { sdp: string }): Promise<void> {
     if (this.pc.signalingState !== 'have-local-offer') return;
-    await this.pc.setRemoteDescription({ type: 'answer', sdp: mungeRemoteSdp(msg.sdp, this.cfg, { sendsVideo: true }) });
+    const cfg =
+      this.minBitrateFloorKbps === null
+        ? this.cfg
+        : { ...this.cfg, video: { ...this.cfg.video, minBitrateKbps: Math.min(this.cfg.video.minBitrateKbps, this.minBitrateFloorKbps) } };
+    await this.pc.setRemoteDescription({ type: 'answer', sdp: mungeRemoteSdp(msg.sdp, cfg, { sendsVideo: true }) });
     this.logEvent('answer получен');
     this.remoteDescriptionSet = true;
     await this.flushCandidates();
@@ -390,7 +404,7 @@ export class PeerSession extends Emitter<PeerEvents> {
     return this.applySenderParams();
   }
 
-  /** Временный потолок битрейта видео (не ниже минимального битрейта из настроек); null — снять */
+  /** Временный потолок битрейта видео (на паузе — и ниже минимального битрейта из настроек); null — снять */
   setBitrateCap(kbps: number | null): Promise<void> {
     if (kbps === this.bitrateCapKbps) return this.paramsChain;
     this.bitrateCapKbps = kbps;
@@ -419,16 +433,14 @@ export class PeerSession extends Emitter<PeerEvents> {
           await updateEncoding(
             this.videoT.sender,
             {
-              maxBitrate:
-                (this.bitrateCapKbps === null
-                  ? v.bitrateKbps
-                  : Math.max(v.minBitrateKbps, Math.min(v.bitrateKbps, this.bitrateCapKbps))) * 1000,
+              // Ограничение на паузе важнее минимума: при минимуме, равном максимуму, оно иначе не работало
+              maxBitrate: (this.bitrateCapKbps === null ? v.bitrateKbps : Math.min(v.bitrateKbps, this.bitrateCapKbps)) * 1000,
               maxFramerate: v.frameRate,
               scaleResolutionDownBy: this.scaleDownBy ?? 1,
               priority: 'high',
               networkPriority: 'high',
             },
-            v.degradationPreference,
+            this.degradationOverride ?? v.degradationPreference,
           );
         }
         if (this.role === 'streamer' && this.systemT?.sender.track) {
