@@ -18,6 +18,7 @@
       </div>
       <div class="spacer"></div>
       <div class="peer-chip" id="peerChip" hidden>
+        <span class="avatar avatar-sm" id="peerAvatar"></span>
         <span class="peer" id="peerName"></span>
         <span class="peer-state" id="peerMicOff" title="У собеседника выключен микрофон" hidden><i data-icon="micOff"></i></span>
         <span class="peer-state" id="peerDeafened" title="У собеседника выключен звук — он вас не слышит" hidden><i data-icon="headphonesOff"></i></span>
@@ -64,6 +65,10 @@
         </form>
 
         <div class="message" id="stageMessage" hidden>
+          <div class="stage-avatars" id="stageAvatars" hidden>
+            <figure><span class="avatar avatar-lg" id="stageSelfAvatar"></span><figcaption>Вы</figcaption></figure>
+            <figure><span class="avatar avatar-lg" id="stagePeerAvatar"></span><figcaption id="stagePeerName"></figcaption></figure>
+          </div>
           <div class="spinner" id="stageSpinner"></div>
           <p class="title" id="stageTitle"></p>
           <p class="sub" id="stageSub"></p>
@@ -76,6 +81,9 @@
         </div>
       </div>
 
+      <!-- Всплывающие реакции: поверх видео, клики проходят сквозь слой -->
+      <div class="reaction-layer" id="reactionLayer" aria-hidden="true"></div>
+
       <aside class="chat" id="chatPanel" hidden>
         <header>
           <h3>Чат</h3>
@@ -84,8 +92,9 @@
         </header>
         <div class="chat-list" id="chatList"></div>
         <form class="chat-form" id="chatForm">
+          <button type="button" class="icon-btn" id="chatSpoiler" title="Спойлер: следующее сообщение или картинка будут скрыты, пока их не откроют щелчком. Часть текста — ||вот так||" aria-pressed="false" data-icon="eyeOff"></button>
           <button type="button" class="icon-btn" id="chatAttach" title="Отправить файлы любого размера (можно перетащить в окно или вставить скриншот Ctrl+V)" data-icon="clip"></button>
-          <textarea id="chatInput" rows="1" placeholder="Сообщение или Ctrl+V — скриншот"></textarea>
+          <textarea id="chatInput" rows="1" placeholder="Сообщение…"></textarea>
           <button type="submit" class="icon-btn primary" id="chatSend" title="Отправить" data-icon="send"></button>
           <input type="file" id="chatFile" multiple hidden />
         </form>
@@ -100,6 +109,7 @@
     <footer class="controls">
       <!-- Слева — свой голос и звук собеседника -->
       <div class="group">
+        <button class="avatar-btn" id="btnSelfAvatar" title="Своя аватарка — открыть настройки"><span class="avatar" id="selfAvatar"></span></button>
         <button class="toggle" id="btnMic" title="Микрофон (Ctrl+M)" disabled>
           <i data-icon="mic"></i>
           <span class="meter"><i id="micLevel"></i></span>
@@ -135,6 +145,12 @@
 
       <!-- В центре — трансляция (у стримера) -->
       <div class="group center">
+        <div class="popover-anchor">
+          <button id="btnReact" title="Реакция на трансляцию — всплывёт у обоих" aria-expanded="false" hidden>
+            <i data-icon="smile"></i><span>Реакция</span>
+          </button>
+          <div class="popover center reaction-panel" id="reactionPanel" hidden></div>
+        </div>
         <button id="btnSwitchSource" title="Выбрать другое окно или экран — трансляция не прерывается" hidden>
           <i data-icon="swap"></i><span>Источник</span>
         </button>
@@ -230,6 +246,8 @@
             <button type="button" data-tab="audio">Звук</button>
             <button type="button" data-tab="network">Сеть</button>
             <button type="button" data-tab="keys">Клавиши</button>
+            <button type="button" data-tab="profile">Аватарка</button>
+            <button type="button" data-tab="reactions">Реакции</button>
             <button type="button" data-tab="diag">Диагностика</button>
           </div>
         </header>
@@ -350,7 +368,7 @@
             </label>
           </div>
           <label class="check"><input type="checkbox" id="sVoiceGate" /><span>Тишина в паузах: глушить микрофон, пока вы молчите (голосовой порог, DeepFilterNet3)</span></label>
-          <label class="check"><input type="checkbox" id="sEcho" /><span>Эхоподавление (выключите, если вы в наушниках)</span></label>
+          <label class="check"><input type="checkbox" id="sEcho" /><span>Эхоподавление — убирает из микрофона звук собеседника, который слышен из ваших наушников или колонок. Выключайте только в закрытых наушниках: из открытых (накладных, «капель» на громкости) звук попадает в микрофон, и собеседник слышит сам себя</span></label>
           <label class="check"><input type="checkbox" id="sAgc" /><span>Автоматическая регулировка громкости микрофона</span></label>
           <div class="row">
             <label class="field">
@@ -454,6 +472,71 @@
           <p class="hint" id="hotkeyStatus"></p>
         </section>
 
+        <section data-panel="profile" hidden>
+          <div class="avatar-settings">
+            <span class="avatar avatar-lg" id="sAvatarPreview"></span>
+            <div class="avatar-settings-body">
+              <div class="with-button">
+                <button type="button" id="btnAvatarPick">Выбрать…</button>
+                <button type="button" id="btnAvatarCrop" hidden>Кадрировать</button>
+                <button type="button" class="ghost" id="btnAvatarRemove">Убрать</button>
+              </div>
+              <p class="hint">
+                PNG, JPEG, WebP, GIF, MP4 или WebM, до 16 МБ. GIF и видео проигрываются без звука. Аватарка меняется
+                после «Готово» в окне кадрирования и уходит собеседнику — «Сохранить» нажимать не нужно.
+              </p>
+              <p class="hint error" id="sAvatarError" hidden></p>
+            </div>
+          </div>
+        </section>
+
+        <section data-panel="reactions" hidden>
+          <label class="check"><input type="checkbox" id="sReactionSounds" /><span>Звук реакций (применяется сразу, в трансляцию не попадает)</span></label>
+          <label class="volume">
+            <span>Громкость реакций</span>
+            <input type="range" id="sReactionVolume" min="0" max="100" step="5" />
+          </label>
+          <div class="rx-heading"><h3>Свои реакции</h3><span class="hint" id="rxCount"></span></div>
+          <p class="hint" id="rxEmpty">Своих реакций пока нет — создайте первую ниже.</p>
+          <div class="rx-list" id="rxList"></div>
+          <fieldset class="rx-create">
+            <legend>Новая реакция</legend>
+            <div class="rx-create-body">
+              <div class="rx-preview" id="rxPreview"></div>
+              <div class="rx-create-fields">
+                <label class="field">
+                  <span>Название (до 32 символов)</span>
+                  <input id="rxName" maxlength="32" spellcheck="false" />
+                </label>
+                <div class="with-button">
+                  <button type="button" id="btnRxPickMedia">Выбрать файл…</button>
+                  <span class="hint" id="rxMediaInfo"></span>
+                </div>
+                <label class="field">
+                  <span>Звук (не длиннее 5 с, остальное обрежется)</span>
+                  <select id="rxSoundMode">
+                    <option value="none">Нет</option>
+                    <option value="file">Отдельный файл</option>
+                    <option value="video" id="rxSoundVideo">Взять из видео</option>
+                  </select>
+                </label>
+                <div class="with-button" id="rxSoundFileRow" hidden>
+                  <button type="button" id="btnRxPickSound">Выбрать звук…</button>
+                  <span class="hint" id="rxSoundInfo"></span>
+                </div>
+                <p class="hint">PNG, JPEG, WebP, GIF до 8 МБ и 1024 px по стороне, MP4 или WebM до 8 МБ и 1920 px. Звук — MP3, OGG, WAV, M4A, WebM или FLAC до 2 МБ. Реакций — не больше 50.</p>
+              </div>
+            </div>
+            <p class="hint error" id="rxError" hidden></p>
+            <div class="with-button rx-create-actions">
+              <button type="button" id="btnRxListen" disabled>Прослушать</button>
+              <div class="spacer"></div>
+              <button type="button" class="ghost" id="btnRxReset">Сбросить</button>
+              <button type="button" class="primary" id="btnRxCreate" disabled>Сохранить реакцию</button>
+            </div>
+          </fieldset>
+        </section>
+
         <section data-panel="diag" hidden>
           <div class="with-button">
             <p class="hint">
@@ -475,6 +558,32 @@
       </form>
     </dialog>
 
+    <dialog id="avatarEditor" class="avatar-editor">
+      <header>
+        <h2>Кадрирование аватарки</h2>
+      </header>
+      <div class="avatar-editor-body">
+        <div class="avatar-editor-stage" id="avatarEditorStage" tabindex="0" aria-label="Кадр аватарки: перетаскивание и стрелки сдвигают, колесо меняет масштаб">
+          <div class="avatar-editor-mask"></div>
+        </div>
+        <p class="hint error" id="avatarEditorError" hidden></p>
+        <div class="avatar-editor-controls">
+          <label class="avatar-editor-zoom">
+            <span>Масштаб</span>
+            <input type="range" id="avatarEditorZoom" min="1" max="4" step="0.01" value="1" />
+          </label>
+          <span class="avatar" id="avatarEditorPreview" title="Как будет выглядеть в малом размере"></span>
+        </div>
+      </div>
+      <footer>
+        <button type="button" class="ghost" id="btnAvatarEditorReset">Сбросить</button>
+        <div class="spacer"></div>
+        <button type="button" id="btnAvatarEditorCancel">Отмена</button>
+        <button type="button" class="primary" id="btnAvatarEditorDone">Готово</button>
+      </footer>
+    </dialog>
+
+    <div class="popover reaction-panel reaction-float" id="chatReactionPicker" hidden></div>
     <div class="toasts" id="toasts" aria-live="polite"></div>
   </body>
 </html>

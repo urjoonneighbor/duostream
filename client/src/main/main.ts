@@ -40,6 +40,8 @@ import { AppAudioCapture } from './app-audio.ts';
 import { log, type LogLevel } from './logger.ts';
 import { Downloads, Uploads } from './downloads.ts';
 import { linkPreview } from './link-preview.ts';
+import { AvatarStore } from './avatar.ts';
+import { ReactionStore } from './reactions.ts';
 import { Overlay } from './overlay.ts';
 import { AppTray } from './tray.ts';
 import type { Config } from '../shared/config';
@@ -168,6 +170,8 @@ const portMapper = new PortMapper((state) => sendToWindow('upnp', state));
 const appAudio = new AppAudioCapture();
 const downloads = new Downloads(() => path.join(app.getPath('downloads'), 'DuoStream'));
 const uploads = new Uploads();
+const avatars = new AvatarStore(() => path.join(app.getPath('userData'), 'avatar'));
+const reactions = new ReactionStore(() => path.join(app.getPath('userData'), 'reactions'));
 const tray = new AppTray({ icon: path.join(RENDERER_ROOT, 'img', 'icon-256.png'), onQuit: () => app.quit() });
 const overlay = new Overlay({ preload: path.join(__dirname, '..', 'preload', 'preload.js'), url: `${APP_ORIGIN}/overlay.html` });
 
@@ -369,6 +373,62 @@ function registerIpc() {
     const dir = path.join(app.getPath('downloads'), 'DuoStream');
     const target = path.resolve(String(file ?? ''));
     if (target.startsWith(dir + path.sep)) shell.showItemInFolder(target);
+  });
+
+  // Своя аватарка (src/main/avatar.ts)
+  ipcMain.handle('avatar:pick', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return avatars.pick(mainWindow);
+  });
+  ipcMain.handle('avatar:commit', (event, crop) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return avatars.commit(crop);
+  });
+  ipcMain.handle('avatar:cancel-pick', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    avatars.cancelPick();
+  });
+  ipcMain.handle('avatar:set-crop', (event, crop) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return avatars.setCrop(crop);
+  });
+  ipcMain.handle('avatar:get', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return avatars.get();
+  });
+  ipcMain.handle('avatar:remove', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return avatars.remove();
+  });
+
+  // Свои реакции (src/main/reactions.ts)
+  ipcMain.handle('reactions:list', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return reactions.list();
+  });
+  ipcMain.handle('reactions:pick-media', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return reactions.pickMedia(mainWindow);
+  });
+  ipcMain.handle('reactions:pick-sound', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return reactions.pickSound(mainWindow);
+  });
+  ipcMain.handle('reactions:cancel-pick', (event) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    reactions.cancelPick();
+  });
+  ipcMain.handle('reactions:create', (event, input) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return reactions.create(input);
+  });
+  ipcMain.handle('reactions:remove', (event, id) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return reactions.remove(id);
+  });
+  ipcMain.handle('reactions:read', (event, hash) => {
+    if (!isTrustedSender(event)) throw new Error('forbidden');
+    return reactions.read(hash);
   });
 
   // Звук только приложения транслируемого окна (src/main/app-audio.ts)
@@ -633,6 +693,13 @@ function createWindow(): BrowserWindow {
     // Статус GPU-функций честный только после запуска GPU-процесса: сразу после старта всё «disabled_software»
     setTimeout(() => log.info('main', 'GPU-функции', app.getGPUFeatureStatus()), 3000);
   });
+  // При backgroundThrottling: false окно не узнаёт, что его свернули или убрали в трей, — говорим сами: видео-аватарки
+  // в это время стоят на паузе. Потеря фокуса — не повод: окно без фокуса часто открыто рядом или на втором мониторе
+  const sendVisibility = () => sendToWindow('window:visibility', win.isVisible() && !win.isMinimized());
+  win.on('show', sendVisibility);
+  win.on('hide', sendVisibility);
+  win.on('minimize', sendVisibility);
+  win.on('restore', sendVisibility);
   overlay.attachMainWindow(win);
   tray.attach(win);
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

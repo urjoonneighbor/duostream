@@ -11,9 +11,14 @@ import { AppAudioTrack } from './app-audio.ts';
 import { GlitchDetector, type GlitchInfo } from './glitch.ts';
 import { FrameRecorder } from './frame-recorder.ts';
 import { Playback, SendGain } from './playback.ts';
-import { Chat } from './chat.ts';
+import { Chat, hideSpoilers } from './chat.ts';
 import { ChatPanel } from './chat-ui.ts';
 import { SettingsDialog, setSelect } from './settings.ts';
+import { AvatarView, SpeakingGate } from './avatar.ts';
+import type { AvatarWho } from './avatar-sync.ts';
+import { ReactionSound } from './reaction-sound.ts';
+import { ReactionLayer, ReactionPicker } from './reaction-ui.ts';
+import { isCustomReactionKey } from './reactions.ts';
 import { $, toast, renderIcons, setIcon, renderList } from './ui.ts';
 import { playCue, type Cue } from './tones.ts';
 import type { CodecName, Config, HotkeyAction, Renderer, Role } from '../../shared/config';
@@ -162,6 +167,8 @@ interface AppState {
   overlayActive: boolean;
   /** Последнее входящее сообщение — в оверлей */
   lastChat: { from: string; text: string; at: number } | null;
+  /** Последняя реакция собеседника на трансляцию — в оверлей */
+  lastReaction: { text: string; at: number } | null;
   /** Чем рисует окно в этом запуске: выбирается при старте по роли из настроек */
   activeRenderer: Renderer;
 }
@@ -218,6 +225,7 @@ const state: AppState = {
   playback: null as unknown as AppState['playback'], // создаётся в init()
   overlayActive: false,
   lastChat: null,
+  lastReaction: null,
   activeRenderer: 'd3d11',
 };
 
@@ -226,6 +234,16 @@ globalThis.duoDebug = state;
 
 let settingsDialog: SettingsDialog;
 let chatPanel: ChatPanel | undefined;
+let reactionSound: ReactionSound | null = null;
+let reactionLayer: ReactionLayer | undefined;
+let streamReactionPicker: ReactionPicker | undefined;
+/** Постоянные места аватарок; чат рисует свои сам. Создаются в init(), когда интерфейс готов */
+let avatarViews: Record<'chip' | 'self' | 'stagePeer' | 'stageSelf', AvatarView> | undefined;
+/** Мерцание при речи: класс переключается только при смене состояния, с удержанием после спада */
+const speakingGates = {
+  me: new SpeakingGate((on) => [avatarViews?.self, avatarViews?.stageSelf].forEach((view) => view?.setSpeaking(on))),
+  peer: new SpeakingGate((on) => [avatarViews?.chip, avatarViews?.stagePeer].forEach((view) => view?.setSpeaking(on))),
+};
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // ======================= подключение =======================
@@ -432,6 +450,8 @@ async function connect(event: Event): Promise<void> {
     signaling.on('welcome', ({ peer }) => {
       const was = state.peer;
       state.peer = peer;
+      // Подключились заново и увидели другого человека (или никого) — чужая аватарка не должна остаться
+      if (was && (peer?.name !== was.name || peer?.role !== was.role || peer?.ip !== was.ip)) forgetPeer(was);
       if (state.peer) {
         if (!was) uiCue('join');
         onPeerPresent();
@@ -439,6 +459,7 @@ async function connect(event: Event): Promise<void> {
       render();
     });
     signaling.on('peer-joined', ({ peer }) => {
+      forgetPeer(state.peer); // свою аватарку он предложит, когда откроются каналы
       state.peer = peer;
       toast(`${peer.name} подключился`, 'ok');
       uiCue('join');
@@ -484,9 +505,17 @@ function onPeerPresent() {
   startStreamerSession().catch((err: Error) => toast(`Ошибка WebRTC: ${err.message}`, 'error'));
 }
 
+/** Собеседника больше нет или это другой человек: его аватарка и подпись в чате не должны перейти к следующему */
+function forgetPeer(was: PeerInfo | null): void {
+  if (was) chatPanel?.sealPeerHistory(was.name);
+  state.chat.avatars.resetPeer();
+  state.chat.reactions.resetPeer();
+}
+
 function onPeerLeft() {
   toast(`${state.peer?.name ?? 'Собеседник'} отключился`, 'warn');
   uiCue('leave');
+  forgetPeer(state.peer);
   state.peer = null;
   state.peerPresence = null;
   state.peerHwDecode = null;
@@ -507,6 +536,7 @@ function teardown(): void {
   }
   const signaling = state.signaling;
   state.signaling = null;
+  forgetPeer(state.peer);
   state.peer = null;
   state.peerPresence = null;
   state.peerHwDecode = null;
@@ -849,6 +879,7 @@ function fillStreamQuality(): void {
 const POPOVERS: Record<string, { button: string; onOpen?: () => void }> = {
   '#streamQualityPanel': { button: '#btnStreamQuality', onOpen: () => fillStreamQuality() },
   '#volumePanel': { button: '#btnVolume' },
+  '#reactionPanel': { button: '#btnReact', onOpen: () => streamReactionPicker?.render() },
 };
 
 function togglePopover(panel: string, show = $(panel).hidden): void {
@@ -1383,6 +1414,7 @@ function applyVoiceState(): void {
   state.mic?.setMuted(!transmit);
   state.playback.voice.setMuted(state.deafened);
   state.playback.system.setMuted(state.deafened);
+  reactionSound?.setDeafened(state.deafened);
   sendPresence();
   render();
 }
@@ -1454,6 +1486,7 @@ function toggleDeafen(): void {
 // ======================= оверлей поверх игры =======================
 
 const OVERLAY_MESSAGE_MS = 8000;
+const OVERLAY_REACTION_MS = 4000;
 
 /** Микрофон и звук собеседника — строкой для оверлея */
 function peerStateText(): string {
@@ -1466,6 +1499,15 @@ function peerStateText(): string {
   if (p.deafened) parts.push('не слышит');
   return parts.join(', ');
 }
+
+/** Говорит ли пользователь: микрофон передаёт (с учётом рации) и уровень выше порога */
+function isMeSpeaking(level: number): boolean {
+  const micOn = Boolean(state.mic) && !state.micMuted && !state.deafened;
+  return micOn && (!pushToTalk() || state.pttHeld) && level > 0.35;
+}
+
+/** Слышен ли собеседник: при выключенном у нас звуке — нет */
+const isPeerSpeaking = (voiceLevel: number) => !state.deafened && voiceLevel > 0 && 20 * Math.log10(voiceLevel) > -45;
 
 /** Состояние для оверлея (src/main/overlay.ts) — 10 раз в секунду, пока подключены */
 function publishOverlay(): void {
@@ -1504,13 +1546,14 @@ function publishOverlay(): void {
     corner: o.corner,
     mic,
     micOff: !micOn,
-    meSpeaking: micOn && (!ptt || state.pttHeld) && (state.mic?.level() ?? 0) > 0.35,
+    meSpeaking: isMeSpeaking(state.mic?.level() ?? 0),
     peerName: state.peer?.name ?? null,
-    peerSpeaking: !state.deafened && voice > 0 && 20 * Math.log10(voice) > -45,
+    peerSpeaking: isPeerSpeaking(voice),
     peerState: peerStateText(),
     deafened: state.deafened,
     stream,
     message: last && Date.now() - last.at < OVERLAY_MESSAGE_MS ? `${last.from}: ${last.text}` : null,
+    reaction: state.lastReaction && Date.now() - state.lastReaction.at < OVERLAY_REACTION_MS ? state.lastReaction.text : null,
   });
 }
 
@@ -1622,6 +1665,9 @@ function meterLoop(): void {
   const voiceDb = voice > 0 ? 20 * Math.log10(voice) : -Infinity;
   state.voicePeakDb = Math.max(state.voicePeakDb, voiceDb);
   $('#voiceLevel').style.transform = `scaleX(${meterScale(voiceDb).toFixed(3)})`;
+  const now = performance.now();
+  speakingGates.me.update(isMeSpeaking(level), now);
+  speakingGates.peer.update(isPeerSpeaking(voice), now);
   requestAnimationFrame(meterLoop);
 }
 
@@ -1824,8 +1870,9 @@ async function saveSettings(next: Config, { notice = 'Настройки сох�
   }
   if (prev.audio.outputDeviceId !== cfg.audio.outputDeviceId) {
     await applySink(state.playback.voice);
-    await applySink(state.playback.system);
+    await applySink(state.playback.system); // звук реакций идёт через контекст голоса — устройство меняется вместе с ним
   }
+  applyReactionAudio();
 
   const pv = prev.video;
   const cv = cfg.video;
@@ -2013,6 +2060,11 @@ function render(): void {
   $('#shareBox').hidden = !share;
   if (share) $('#shareAddress').textContent = state.share!.address;
   $('#shareNote').textContent = share ? upnpNote() : '';
+  // Аватарки на сцене — собеседник на связи, а видео нет
+  const stageAvatars = Boolean(message) && Boolean(state.peer) && pcState === 'connected';
+  $('#stageAvatars').hidden = !stageAvatars;
+  if (stageAvatars) $('#stagePeerName').textContent = state.peer!.name;
+  renderAvatars();
 
   // Кнопки
   const streamBtn = $('#btnStream');
@@ -2027,6 +2079,12 @@ function render(): void {
   $('#btnStreamQuality').hidden = !live;
   $('#streamQualityText').textContent = streamQualityLabel(state.cfg.video);
   if (!live && !$('#streamQualityPanel').hidden) togglePopover('#streamQualityPanel', false);
+  // Реакции на трансляцию — у стримера и у зрителя, пока она идёт и есть с кем обмениваться
+  const streaming = streamer ? Boolean(state.screen) : state.remote.live;
+  const canReact = connected && Boolean(state.peer) && streaming;
+  $('#btnReact').hidden = !canReact;
+  $<HTMLButtonElement>('#btnReact').disabled = !state.chat.connected;
+  if (!canReact && !$('#reactionPanel').hidden) togglePopover('#reactionPanel', false);
   $('#btnDisconnect').hidden = !connected;
 
   const mic = state.mic;
@@ -2062,6 +2120,68 @@ function render(): void {
   // Отметка глюка — когда есть собеседник и идёт видео (у кого-то из двоих)
   $('#btnMarkGlitch').hidden = !state.cfg.app.debugFrames || !state.peer || !(state.screen || state.remote?.live);
   chatPanel?.setAvailable(Boolean(state.peer));
+}
+
+const myDisplayName = () => state.cfg.signaling.displayName || ROLE_NAME[state.role];
+const peerDisplayName = () => state.peer?.name ?? 'Собеседник';
+
+/** Текущие аватарки — в постоянные места и в чат; те же данные не перезапускают видео */
+function renderAvatars(): void {
+  const views = avatarViews;
+  if (views) {
+    const { me, peer } = state.chat.avatars;
+    views.chip.set(peer, peerDisplayName());
+    views.stagePeer.set(peer, peerDisplayName());
+    views.self.set(me, myDisplayName());
+    views.stageSelf.set(me, myDisplayName());
+  }
+  chatPanel?.updateAvatars();
+}
+
+function chatAvatar(who: AvatarWho) {
+  return who === 'me' ? { media: state.chat.avatars.me, name: myDisplayName() } : { media: state.chat.avatars.peer, name: peerDisplayName() };
+}
+
+function applyReactionAudio(): void {
+  reactionSound?.configure(state.cfg.audio.reactionSounds, sliderGain(state.cfg.audio.reactionVolume / 100));
+}
+
+/** Настройки звука реакций действуют сразу, без «Сохранить» */
+async function setReactionAudio(enabled: boolean, volume: number, persist: boolean): Promise<void> {
+  reactionSound?.configure(enabled, sliderGain(volume / 100));
+  if (persist) state.cfg = await window.duo.saveConfig({ ...state.cfg, audio: { ...state.cfg.audio, reactionSounds: enabled, reactionVolume: volume } });
+}
+
+function openSettings(tab?: string): void {
+  void settingsDialog.open(state.cfg, state.configPath, { viewerIp: state.role === 'streamer' ? state.peer?.ip : null, tab });
+}
+
+/** Реакции у обоих: всплывающие поверх видео, звук и файлы своих реакций */
+function bindReactions(): void {
+  const sync = state.chat.reactions;
+  state.chat.on('reaction', ({ key, who, on, silent }) => {
+    if (!on) return;
+    void sync.ensureMedia(key);
+    if (!silent) sync.playSound(key, who === 'peer');
+  });
+  state.chat.on('stream-reaction', ({ key, who }) => {
+    if (!(state.role === 'streamer' ? state.screen : state.remote.live)) return; // от собеседника могло прийти уже после конца трансляции
+    sync.playSound(key, who === 'peer');
+    if (who === 'peer') state.lastReaction = { text: `${state.peer?.name ?? 'Собеседник'}: ${sync.label(key)}`, at: Date.now() };
+    // Своя реакция читается с диска за доли секунды; чужая показывается сразу — пока файла нет, заглушкой
+    if (who === 'me' && isCustomReactionKey(key) && !sync.media(key)) void sync.ensureMedia(key).finally(() => reactionLayer?.spawn(key));
+    else {
+      if (who === 'peer') void sync.ensureMedia(key); // файл могли вытеснить из кэша: к следующей реакции он снова будет
+      reactionLayer?.spawn(key);
+    }
+  });
+  state.chat.on('change', ({ item }) => {
+    if (!item) render(); // открылись или закрылись каналы: кнопка реакции зависит от них
+  });
+  window.duo.reactions
+    .list()
+    .then((own) => sync.setOwn(own))
+    .catch((err: Error) => console.warn('[reactions] не удалось загрузить свои реакции:', err.message));
 }
 
 function toggleFullscreen(): void {
@@ -2192,9 +2312,8 @@ function bindEvents(): void {
   $('#btnMarkGlitch').addEventListener('click', () => void markGlitch(true));
   setupFullscreenIdle();
   $<HTMLVideoElement>('#video').addEventListener('dblclick', toggleFullscreen);
-  $('#btnSettings').addEventListener('click', () =>
-    void settingsDialog.open(state.cfg, state.configPath, { viewerIp: state.role === 'streamer' ? state.peer?.ip : null }),
-  );
+  $('#btnSettings').addEventListener('click', () => openSettings());
+  $('#btnSelfAvatar').addEventListener('click', () => openSettings('profile'));
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.code === 'KeyM') {
       e.preventDefault();
@@ -2218,14 +2337,49 @@ async function init(): Promise<void> {
   if (!state.nativeStatus.available) console.warn('[capture] собственный захват недоступен:', state.nativeStatus.reason);
   window.duo.nativeCapture.onEvent(onNativeEvent);
 
-  settingsDialog = new SettingsDialog({ onSave: saveSettings, getDiagnostics: collectDiagnostics });
-  chatPanel = new ChatPanel(state.chat, {
-    peerName: () => state.peer?.name ?? 'Собеседник',
-    canSend: () => Boolean(state.peer),
+  state.playback = { voice: new Playback($<HTMLAudioElement>('#voiceAudio')), system: new Playback($<HTMLAudioElement>('#systemAudio'), 'playback') };
+  // Устройство вывода выставляется и до первого голоса: звук реакций идёт через этот же контекст
+  state.playback.voice.setSink(state.cfg.audio.outputDeviceId).catch(() => {});
+  reactionSound = new ReactionSound(state.playback.voice.ctx);
+  state.chat.reactions.attachSound(reactionSound);
+  applyReactionAudio();
+  settingsDialog = new SettingsDialog({
+    onSave: saveSettings,
+    getDiagnostics: collectDiagnostics,
+    avatars: state.chat.avatars,
+    myName: myDisplayName,
+    reactions: state.chat.reactions,
+    reactionSound: () => reactionSound,
+    onReactionAudio: setReactionAudio,
   });
+  chatPanel = new ChatPanel(state.chat, {
+    peerName: peerDisplayName,
+    canSend: () => Boolean(state.peer),
+    avatar: chatAvatar,
+    openReactionSettings: () => openSettings('reactions'),
+  });
+  reactionLayer = new ReactionLayer($('#reactionLayer'), state.chat.reactions);
+  streamReactionPicker = new ReactionPicker($('#reactionPanel'), state.chat.reactions, {
+    onPick: (key) => void state.chat.sendStreamReaction(key),
+    onCreate: () => {
+      closePopovers();
+      openSettings('reactions');
+    },
+  });
+  avatarViews = {
+    chip: new AvatarView($('#peerAvatar')),
+    self: new AvatarView($('#selfAvatar')),
+    stagePeer: new AvatarView($('#stagePeerAvatar')),
+    stageSelf: new AvatarView($('#stageSelfAvatar')),
+  };
+  state.chat.avatars.on('change', renderAvatars);
+  window.duo.avatar
+    .get()
+    .then((own) => state.chat.avatars.setOwn(own))
+    .catch((err: Error) => console.warn('[avatar] не удалось загрузить свою аватарку:', err.message));
   fillConnectForm();
   bindEvents();
-  state.playback = { voice: new Playback($<HTMLAudioElement>('#voiceAudio')), system: new Playback($<HTMLAudioElement>('#systemAudio'), 'playback') };
+  bindReactions();
   restoreVolumes();
   void refreshOutputs();
   render();
@@ -2246,7 +2400,7 @@ async function init(): Promise<void> {
   // Последнее входящее сообщение — в оверлей на несколько секунд
   state.chat.on('change', ({ item }) => {
     if (item && !item.mine && (item.kind === 'msg' || item.status === 'offered')) {
-      const text = item.kind === 'msg' ? item.text : `файл «${item.name}»`;
+      const text = item.kind === 'msg' ? hideSpoilers(item.text) : `файл «${item.name}»`;
       state.lastChat = { from: state.peer?.name ?? 'Собеседник', text: text.slice(0, 200), at: Date.now() };
     }
   });
