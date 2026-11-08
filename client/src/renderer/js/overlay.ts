@@ -18,4 +18,7 @@ window.duo.overlay.onState((s) => {
   const message = $('#message');
   message.hidden = !s.message;
   message.textContent = s.message ?? '';
+  const reaction = $('#reaction');
+  reaction.hidden = !s.reaction;
+  reaction.textContent = s.reaction ?? '';
 });

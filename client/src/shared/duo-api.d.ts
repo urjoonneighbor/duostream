@@ -82,6 +82,8 @@ export interface OverlayState {
   deafened?: boolean;
   stream?: string;
   message?: string | null;
+  /** Реакция собеседника на трансляцию: эмодзи или имя своей */
+  reaction?: string | null;
 }
 
 /** Карточка ссылки в чате: её готовит отправитель (src/main/link-preview.ts) и шлёт вместе с сообщением */
@@ -94,6 +96,54 @@ export interface LinkPreview {
   image?: string;
   /** Видео (YouTube, og:type video) — на картинке рисуется значок воспроизведения */
   video?: boolean;
+}
+
+export type AvatarMime = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif' | 'video/mp4' | 'video/webm';
+
+/** Кадрирование аватарки: x и y — положение кадра, 0..100 (50 — по центру), zoom — 1..4. Сам файл не меняется */
+export interface AvatarCrop {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+/** Своя аватарка (src/main/avatar.ts): MIME — по сигнатуре содержимого, hash — SHA-256 hex */
+export interface AvatarFile {
+  mime: AvatarMime;
+  data: Uint8Array;
+  hash: string;
+  crop: AvatarCrop;
+}
+
+export type ReactionSoundMime = 'audio/mpeg' | 'audio/ogg' | 'audio/wav' | 'audio/flac' | 'audio/mp4' | 'audio/webm';
+
+/** Звук своей реакции: отдельный файл или дорожка самого видео */
+export type ReactionSoundRef = { kind: 'file'; hash: string; mime: ReactionSoundMime; size: number } | { kind: 'video' };
+
+/** Своя реакция (src/main/reactions.ts): id — SHA-256 файла, MIME — по сигнатуре */
+export interface CustomReaction {
+  id: string;
+  name: string;
+  mime: AvatarMime;
+  size: number;
+  sound: ReactionSoundRef | null;
+  /** Маленькая статичная картинка для списка и чипов (data:image/…) */
+  thumb: string | null;
+}
+
+/** Файл, выбранный для новой реакции: ещё не сохранён, лежит в памяти главного процесса */
+export interface ReactionPickedFile {
+  mime: string;
+  data: Uint8Array;
+  hash: string;
+  size: number;
+  name: string;
+}
+
+export interface ReactionCreate {
+  name: string;
+  soundMode: 'none' | 'file' | 'video';
+  thumb: string | null;
 }
 
 export interface GpuSummary {
@@ -147,6 +197,34 @@ export interface DuoApi {
   /** Кадры отметки глюка → папка и сколько сохранено (null — лимит за сеанс) */
   saveLogFrames(label: string, frames: LogFrame[]): Promise<{ dir: string; saved: number } | null>;
   onMainError(cb: (message: string) => void): void;
+  /** Окно показано / свёрнуто или убрано в трей */
+  onWindowVisibility(cb: (shown: boolean) => void): void;
+  /** Своя аватарка: выбор файла, чтение и удаление (src/main/avatar.ts) */
+  avatar: {
+    /** Диалог выбора файла; avatar: null — выбор отменён. Аватарка ещё не меняется: ждёт commit или cancelPick */
+    pick(): Promise<Result<{ avatar: AvatarFile | null }>>;
+    /** Выбранный файл становится аватаркой с этим кадрированием */
+    commit(crop: AvatarCrop): Promise<Result<object>>;
+    /** Забыть выбранный файл */
+    cancelPick(): Promise<void>;
+    /** Новое кадрирование текущей аватарки */
+    setCrop(crop: AvatarCrop): Promise<Result<object>>;
+    get(): Promise<AvatarFile | null>;
+    remove(): Promise<Result<object>>;
+  };
+  /** Свои реакции: хранение в <userData>/reactions (src/main/reactions.ts) */
+  reactions: {
+    list(): Promise<CustomReaction[]>;
+    /** Диалог выбора картинки или видео; file: null — выбор отменён. Файл ждёт create */
+    pickMedia(): Promise<Result<{ file: ReactionPickedFile | null }>>;
+    /** Диалог выбора звука; file: null — выбор отменён */
+    pickSound(): Promise<Result<{ file: ReactionPickedFile | null }>>;
+    cancelPick(): Promise<void>;
+    create(input: ReactionCreate): Promise<Result<{ reaction: CustomReaction }>>;
+    remove(id: string): Promise<Result<object>>;
+    /** Файл реакции или звука по hash; null — нет такого или файл испорчен */
+    read(hash: string): Promise<Uint8Array | null>;
+  };
   /** Оверлей поверх игры (src/main/overlay.ts) */
   overlay: {
     /** Главное окно: текущее состояние для оверлея */

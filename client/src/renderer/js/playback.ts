@@ -3,7 +3,7 @@
 // а пики, упирающиеся в 0 дБ, мягко прижимаются.
 
 /** Лимитер: срабатывает только у самого потолка, тихий и средний звук не трогает */
-function createLimiter(ctx: AudioContext): DynamicsCompressorNode {
+export function createLimiter(ctx: AudioContext): DynamicsCompressorNode {
   const limiter = ctx.createDynamicsCompressor();
   limiter.threshold.value = -3;
   limiter.knee.value = 0;

@@ -1,6 +1,12 @@
 // Окно настроек: читает и правит копию stream.config.json.
 import { $, renderList, toast } from './ui.ts';
 import { playTestTone } from './tones.ts';
+import { AvatarView, avatarFitsResolution } from './avatar.ts';
+import { AvatarEditor } from './avatar-editor.ts';
+import type { AvatarSync } from './avatar-sync.ts';
+import { ReactionSettings } from './reaction-settings.ts';
+import type { ReactionSync } from './reaction-sync.ts';
+import type { ReactionSound } from './reaction-sound.ts';
 import type { Config, HotkeyAction, HotkeyBinding } from '../../shared/config';
 import type { Row } from './stats.ts';
 
@@ -43,10 +49,38 @@ export class SettingsDialog {
   private cfg!: Config;
   private viewerIp: string | null = null;
   private recordingAction: HotkeyAction | null = null;
+  private readonly avatars: AvatarSync;
+  private readonly myName: () => string;
+  private readonly avatarPreview = new AvatarView($('#sAvatarPreview'));
+  private readonly avatarEditor = new AvatarEditor();
+  private readonly reactionSettings: ReactionSettings;
 
-  constructor({ onSave, getDiagnostics }: { onSave: (cfg: Config) => Promise<void>; getDiagnostics: () => Promise<Row[]> }) {
+  constructor({
+    onSave,
+    getDiagnostics,
+    avatars,
+    myName,
+    reactions,
+    reactionSound,
+    onReactionAudio,
+  }: {
+    onSave: (cfg: Config) => Promise<void>;
+    getDiagnostics: () => Promise<Row[]>;
+    avatars: AvatarSync;
+    myName: () => string;
+    reactions: ReactionSync;
+    reactionSound: () => ReactionSound | null;
+    onReactionAudio: (enabled: boolean, volume: number, persist: boolean) => Promise<void>;
+  }) {
     this.onSave = onSave;
     this.getDiagnostics = getDiagnostics;
+    this.avatars = avatars;
+    this.myName = myName;
+    this.reactionSettings = new ReactionSettings({ sync: reactions, sound: reactionSound, onAudio: onReactionAudio });
+    avatars.on('change', ({ who }) => who === 'me' && this.renderAvatar());
+    $('#btnAvatarPick').addEventListener('click', () => void this.pickAvatar());
+    $('#btnAvatarCrop').addEventListener('click', () => void this.cropAvatar());
+    $('#btnAvatarRemove').addEventListener('click', () => void this.removeAvatar());
     this.tabs = [...$('#settingsTabs').querySelectorAll('button')];
     this.tabs.forEach((b) => b.addEventListener('click', () => this.showTab(b.dataset.tab ?? 'video')));
 
@@ -75,6 +109,7 @@ export class SettingsDialog {
     });
     // Закрыли окно, пока ждали нажатия — перестаём ждать
     this.dialog.addEventListener('close', () => {
+      this.reactionSettings.close();
       if (this.recordingAction) void window.duo.hotkeys.cancel();
     });
     // Esc во время назначения отменяет назначение, а не закрывает окно
@@ -101,9 +136,13 @@ export class SettingsDialog {
     });
   }
 
-  /** @param viewerIp адрес подключённого зрителя (у стримера) */
-  async open(cfg: Config, configPath: string, { viewerIp = null }: { viewerIp?: string | null } = {}): Promise<void> {
+  /**
+   * @param viewerIp адрес подключённого зрителя (у стримера)
+   * @param tab какую вкладку открыть
+   */
+  async open(cfg: Config, configPath: string, { viewerIp = null, tab = 'video' }: { viewerIp?: string | null; tab?: string } = {}): Promise<void> {
     this.cfg = structuredClone(cfg);
+    this.renderAvatar();
     $<HTMLInputElement>('#sAllowedIps').value = this.cfg.signaling.allowedIps.join('\n');
     this.viewerIp = viewerIp;
     this.updateAllowViewer();
@@ -134,6 +173,7 @@ export class SettingsDialog {
     $<HTMLInputElement>('#sSystemAudio').checked = a.captureSystemAudio;
     $<HTMLInputElement>('#sPushToTalk').checked = a.pushToTalk;
     $<HTMLInputElement>('#sUiSounds').checked = a.uiSounds;
+    this.reactionSettings.open(a);
     $<HTMLInputElement>('#sPttRelease').value = String(a.pushToTalkReleaseMs);
     this.recordingAction = null;
     this.renderHotkeys();
@@ -169,8 +209,76 @@ export class SettingsDialog {
       toast(`Не удалось получить список аудиоустройств: ${(err as Error).message}`, 'warn');
     }
 
-    this.showTab('video');
+    this.showAvatarError('');
+    this.showTab(tab);
     this.dialog.showModal();
+  }
+
+  private renderAvatar(): void {
+    const me = this.avatars.me;
+    this.avatarPreview.set(me, this.myName());
+    $<HTMLButtonElement>('#btnAvatarRemove').disabled = !me;
+    $('#btnAvatarCrop').hidden = !me;
+  }
+
+  /** Причина отказа — в блоке «Аватарка»: тост лежит под модальным диалогом и его затемнением */
+  private showAvatarError(text: string): void {
+    const el = $('#sAvatarError');
+    el.textContent = text;
+    el.hidden = !text;
+  }
+
+  /** Файл, затем редактор кадра; «Готово» применяет аватарку сразу, не дожидаясь «Сохранить» */
+  private async pickAvatar(): Promise<void> {
+    // «Кадрировать» тоже: пока файл читается и записывается, редактор открылся бы со старой аватаркой
+    const buttons = [$<HTMLButtonElement>('#btnAvatarPick'), $<HTMLButtonElement>('#btnAvatarCrop')];
+    for (const button of buttons) button.disabled = true;
+    this.showAvatarError('');
+    try {
+      const result = await window.duo.avatar.pick();
+      if (!result.ok) return this.showAvatarError(result.error);
+      if (!result.avatar) return;
+      const file = result.avatar;
+      const me = this.avatars.me;
+      const crop = await this.avatarEditor.open(new Blob([file.data as BlobPart], { type: file.mime }), file.mime, file.hash === me?.hash ? me.crop : file.crop);
+      if (!crop) {
+        await window.duo.avatar.cancelPick();
+        return;
+      }
+      const saved = await window.duo.avatar.commit(crop);
+      if (!saved.ok) return this.showAvatarError(saved.error);
+      this.avatars.setOwn({ ...file, crop });
+      // Приёмная сторона отклонит такой файл: пусть выбравший узнает об этом сразу
+      const current = this.avatars.me;
+      if (current && !(await avatarFitsResolution(current.blob, current.mime))) this.showAvatarError('Собеседник не увидит эту аватарку: файл не читается или разрешение слишком большое (предел около 4096×4096).');
+    } catch (err) {
+      this.showAvatarError(`Не удалось выбрать аватарку: ${(err as Error).message}`);
+    } finally {
+      for (const button of buttons) button.disabled = false;
+    }
+  }
+
+  /** Редактор кадра для уже стоящей аватарки: файл не меняется и заново не передаётся */
+  private async cropAvatar(): Promise<void> {
+    const me = this.avatars.me;
+    if (!me) return;
+    this.showAvatarError('');
+    try {
+      const crop = await this.avatarEditor.open(me.blob, me.mime, me.crop);
+      if (!crop) return;
+      const saved = await window.duo.avatar.setCrop(crop);
+      if (saved.ok) this.avatars.setOwnCrop(crop);
+      else this.showAvatarError(`Не удалось сохранить кадр: ${saved.error}`);
+    } catch (err) {
+      this.showAvatarError(`Не удалось сохранить кадр: ${(err as Error).message}`);
+    }
+  }
+
+  private async removeAvatar(): Promise<void> {
+    this.showAvatarError('');
+    const result = await window.duo.avatar.remove().catch((err: Error) => ({ ok: false as const, error: err.message }));
+    if (result.ok) this.avatars.setOwn(null);
+    else this.showAvatarError(`Не удалось убрать аватарку: ${result.error}`);
   }
 
   private renderHotkeys(): void {
@@ -338,6 +446,7 @@ export class SettingsDialog {
       pushToTalk: $<HTMLInputElement>('#sPushToTalk').checked,
       uiSounds: $<HTMLInputElement>('#sUiSounds').checked,
       pushToTalkReleaseMs: num('#sPttRelease'),
+      ...this.reactionSettings.readAudio(),
     });
     const stun = $<HTMLInputElement>('#sStun')
       .value.split(/\s+/)

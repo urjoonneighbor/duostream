@@ -544,6 +544,22 @@ textarea {
   background: #1d2a48;
   border-color: #2b3d66;
 }
+/* Строка сообщения: кружок аватарки и пузырь */
+.chat-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  max-width: 96%;
+  align-self: flex-start;
+}
+.chat-row.mine {
+  flex-direction: row-reverse;
+  align-self: flex-end;
+}
+.chat-row .chat-item {
+  min-width: 0;
+  max-width: none;
+}
 .chat-item .meta {
   color: var(--muted);
   font-size: 11px;
@@ -554,6 +570,53 @@ textarea {
 }
 .chat-item .file-name {
   font-weight: 600;
+}
+/* Спойлер: текст закрашен, картинка размыта — до щелчка */
+.spoiler {
+  border-radius: 4px;
+  transition:
+    background 0.15s,
+    color 0.15s;
+}
+.spoiler:not(.revealed) {
+  color: transparent;
+  background: #3b4150;
+  cursor: pointer;
+  user-select: none;
+}
+.spoiler:not(.revealed) a {
+  color: transparent;
+  pointer-events: none;
+}
+.spoiler.revealed {
+  background: rgba(255, 255, 255, 0.06);
+}
+.spoiler-media {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 6px;
+  background: none !important;
+}
+.spoiler-media:not(.revealed) .chat-thumb {
+  filter: blur(22px) brightness(0.6);
+  cursor: pointer;
+}
+.spoiler-media:not(.revealed)::after {
+  content: 'СПОЙЛЕР';
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+#chatSpoiler.active {
+  color: var(--accent);
+  background: rgba(91, 140, 255, 0.15);
 }
 .chat-thumb {
   display: block;
@@ -1061,4 +1124,561 @@ legend {
     opacity: 0;
     transform: translateY(8px);
   }
+}
+
+/* ---------- аватарки ---------- */
+.avatar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--panel-2);
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--muted);
+  font-weight: 600;
+  line-height: 1;
+}
+.avatar.has-media .avatar-letter {
+  visibility: hidden;
+}
+/* Обрезает отдельный слой, а не сам кружок: кольцо речи выступает за его край */
+.avatar-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 50%;
+}
+.avatar-clip > img,
+.avatar-clip > video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: transparent;
+}
+.avatar-sm {
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+}
+.avatar-chat {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+  margin-top: 2px;
+  user-select: none; /* буква-заглушка не должна попадать в копируемый текст чата */
+}
+.avatar-lg {
+  width: 96px;
+  height: 96px;
+  font-size: 36px;
+}
+/* Кольцо «говорит»: только transform и opacity — без перекладки */
+.avatar::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border: 2px solid var(--good);
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--good);
+  opacity: 0;
+  pointer-events: none;
+}
+.avatar.speaking::after {
+  animation: avatar-speak 0.9s ease-in-out infinite;
+}
+@keyframes avatar-speak {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.07);
+  }
+}
+button.avatar-btn {
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+}
+button.avatar-btn:hover:not(:disabled) {
+  background: transparent;
+}
+.stage-avatars {
+  display: flex;
+  justify-content: center;
+  gap: 40px;
+  margin-bottom: 18px;
+}
+.stage-avatars figure {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  margin: 0;
+  min-width: 0;
+}
+.stage-avatars figcaption {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.avatar-settings {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+.avatar-settings-body {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* ---------- редактор кадра аватарки ---------- */
+.avatar-editor-body {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  justify-items: center;
+}
+/* 320 и круг 240 — STAGE и BOX в js/avatar-editor.ts */
+.avatar-editor-stage {
+  position: relative;
+  width: 320px;
+  height: 320px;
+  overflow: hidden;
+  border-radius: var(--radius);
+  background: var(--bg);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.avatar-editor-stage.dragging {
+  cursor: grabbing;
+}
+.avatar-editor-stage:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Без object-fit: видно и то, что вне круга; размер и положение задаёт редактор */
+.avatar-editor-stage > img,
+.avatar-editor-stage > video {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  max-width: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.avatar-editor-mask {
+  position: absolute;
+  inset: 40px;
+  z-index: 1;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 240px rgba(0, 0, 0, 0.62),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+  pointer-events: none;
+}
+.avatar-editor-controls {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 320px;
+}
+.avatar-editor-zoom {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.avatar-editor-zoom input {
+  flex: 1;
+  min-width: 0;
+}
+.avatar-editor .hint.error {
+  width: 320px;
+}
+
+/* ---------- реакции ---------- */
+.rx-emoji {
+  font-family: 'Segoe UI Emoji', 'Segoe UI', sans-serif;
+  line-height: 1;
+}
+.chat-item {
+  position: relative;
+}
+/* Кнопка появляется при наведении на сообщение */
+.reaction-add {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.reaction-add .icon {
+  width: 15px;
+  height: 15px;
+}
+.chat-item.mine .reaction-add {
+  right: auto;
+  left: -8px;
+}
+.chat-item:hover .reaction-add,
+.reaction-add:focus-visible {
+  opacity: 1;
+}
+.reaction-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+  white-space: normal;
+  user-select: none;
+}
+.reaction-chip {
+  position: relative;
+  height: 24px;
+  padding: 0 7px;
+  gap: 4px;
+  border-radius: 12px;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: transparent;
+}
+.reaction-chip.mine {
+  background: rgba(91, 140, 255, 0.22);
+  border-color: var(--accent);
+}
+.reaction-chip.pop {
+  animation: rx-pop 0.32s ease-out;
+}
+.reaction-chip.pop .rx-emoji {
+  display: inline-block; /* transform не действует на строчные элементы */
+  animation-duration: 0.7s;
+  animation-iteration-count: 1;
+  animation-timing-function: ease-in-out;
+}
+.reaction-count {
+  font-variant-numeric: tabular-nums;
+}
+.rx-thumb {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  display: block;
+}
+.rx-pending {
+  display: block;
+  max-width: 88px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+@keyframes rx-pop {
+  0% {
+    transform: scale(0.5);
+  }
+  65% {
+    transform: scale(1.18);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Выбор реакции */
+.reaction-panel {
+  width: 300px;
+  gap: 10px;
+}
+.reaction-float {
+  position: fixed;
+  bottom: auto;
+  left: 0;
+  top: 0;
+  z-index: 30;
+  app-region: no-drag; /* может оказаться над областью перетаскивания окна */
+}
+.rx-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, 44px);
+  gap: 4px;
+}
+.rx-grid-custom {
+  max-height: 180px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.rx-pick {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  justify-content: center;
+  font-size: 24px;
+  border-color: transparent;
+  background: transparent;
+  overflow: hidden;
+}
+.rx-pick .rx-emoji {
+  display: block; /* transform не действует на строчные элементы */
+}
+.rx-pick .rx-thumb {
+  width: 36px;
+  height: 36px;
+}
+.rx-pick .rx-pending {
+  max-width: 40px;
+  font-size: 10px;
+}
+.rx-hover-live {
+  position: absolute;
+  inset: 4px;
+  width: calc(100% - 8px);
+  height: calc(100% - 8px);
+  object-fit: contain;
+  background: var(--panel-2);
+}
+/* В чипе живое превью встаёт точно на статичную картинку, счётчик остаётся виден */
+.reaction-chip .rx-hover-live {
+  inset: 2px auto auto 7px;
+  width: 18px;
+  height: 18px;
+  background: var(--panel-2); /* .stage video задаёт чёрный фон; чат лежит внутри сцены */
+}
+.rx-create-link {
+  justify-self: start;
+}
+
+/* Анимации эмодзи: только transform */
+.rx-pick[class*='rx-anim-']:hover .rx-emoji,
+.rx-float-emoji {
+  animation-duration: 0.9s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-in-out;
+}
+.rx-anim-bounce:hover .rx-emoji,
+.rx-float-emoji.rx-anim-bounce,
+.reaction-chip.pop.rx-anim-bounce .rx-emoji {
+  animation-name: rx-bounce;
+}
+.rx-anim-pulse:hover .rx-emoji,
+.rx-float-emoji.rx-anim-pulse,
+.reaction-chip.pop.rx-anim-pulse .rx-emoji {
+  animation-name: rx-pulse;
+}
+.rx-anim-wobble:hover .rx-emoji,
+.rx-float-emoji.rx-anim-wobble,
+.reaction-chip.pop.rx-anim-wobble .rx-emoji {
+  animation-name: rx-wobble;
+}
+.rx-anim-flicker:hover .rx-emoji,
+.rx-float-emoji.rx-anim-flicker,
+.reaction-chip.pop.rx-anim-flicker .rx-emoji {
+  animation-name: rx-flicker;
+  animation-duration: 0.45s;
+}
+.rx-anim-spin:hover .rx-emoji,
+.rx-float-emoji.rx-anim-spin,
+.reaction-chip.pop.rx-anim-spin .rx-emoji {
+  animation-name: rx-spin;
+  animation-duration: 1.4s;
+}
+.rx-anim-clap:hover .rx-emoji,
+.rx-float-emoji.rx-anim-clap,
+.reaction-chip.pop.rx-anim-clap .rx-emoji {
+  animation-name: rx-clap;
+  animation-duration: 0.4s;
+}
+@keyframes rx-bounce {
+  50% {
+    transform: translateY(-18%);
+  }
+}
+@keyframes rx-pulse {
+  50% {
+    transform: scale(1.2);
+  }
+}
+@keyframes rx-wobble {
+  25% {
+    transform: rotate(-14deg);
+  }
+  75% {
+    transform: rotate(14deg);
+  }
+}
+@keyframes rx-flicker {
+  50% {
+    transform: scale(1.1, 1.18) translateY(-4%);
+  }
+}
+@keyframes rx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes rx-clap {
+  50% {
+    transform: scale(0.82);
+  }
+}
+
+/* Всплывающие реакции: поверх видео и заставки, под чатом; клики проходят сквозь слой */
+.reaction-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  overflow: hidden;
+  pointer-events: none;
+  contain: strict;
+}
+.rx-float {
+  position: absolute;
+  bottom: 8px;
+  display: flex;
+  will-change: transform, opacity;
+  animation: rx-rise 3.5s ease-out forwards;
+}
+.rx-float-emoji {
+  display: block;
+  font-size: 56px;
+}
+.rx-float-media {
+  display: block;
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  background: transparent;
+}
+/* .stage video растягивает видео на всю сцену */
+.stage .rx-float-media {
+  width: 96px;
+  height: 96px;
+  background: transparent;
+}
+.rx-float .rx-pending {
+  max-width: 180px;
+  padding: 6px 12px;
+  border-radius: 14px;
+  background: rgba(13, 15, 19, 0.75);
+  color: var(--text);
+  font-size: 15px;
+}
+@keyframes rx-rise {
+  0% {
+    transform: translate3d(0, 20px, 0) scale(0.6);
+    opacity: 0;
+  }
+  10% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 1;
+  }
+  75% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate3d(0, -72vh, 0) scale(1);
+    opacity: 0;
+  }
+}
+
+/* Вкладка «Реакции» в настройках */
+.rx-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.rx-heading h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.rx-list {
+  display: grid;
+  gap: 6px;
+}
+.rx-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.rx-row-preview {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel-2);
+}
+.rx-row-preview > img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.rx-row-text {
+  flex: 1;
+  min-width: 0;
+}
+.rx-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rx-create {
+  display: grid;
+  gap: 10px;
+}
+.rx-create-body {
+  display: flex;
+  gap: 16px;
+}
+.rx-preview {
+  flex: none;
+  width: 120px;
+  height: 120px;
+  border-radius: 10px;
+  background: var(--panel-2);
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.rx-preview > img,
+.rx-preview > video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.rx-create-fields {
+  display: grid;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+.rx-create-actions {
+  align-items: center;
+}
+.rx-create-actions .spacer {
+  flex: 1;
 }

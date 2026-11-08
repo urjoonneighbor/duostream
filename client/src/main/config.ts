@@ -44,6 +44,8 @@ export const DEFAULTS: Readonly<Config> = Object.freeze<Config>({
     pushToTalk: false,
     pushToTalkReleaseMs: 150,
     uiSounds: true, // звуки событий: собеседник подключился/отключился, трансляция началась/закончилась
+    reactionSounds: true, // звуки своих реакций у собеседника и у вас
+    reactionVolume: 70, // 0..100, % ползунка
   },
   // Глобальные горячие клавиши (src/main/hotkeys.ts); null — не назначено. Коды — uiohook.
   hotkeys: {
@@ -209,6 +211,8 @@ export function sanitize(input: unknown): Config {
   a.pushToTalk = bool(a.pushToTalk, d.audio.pushToTalk);
   a.pushToTalkReleaseMs = clampInt(a.pushToTalkReleaseMs, 0, 2000, d.audio.pushToTalkReleaseMs);
   a.uiSounds = bool(a.uiSounds, d.audio.uiSounds);
+  a.reactionSounds = bool(a.reactionSounds, d.audio.reactionSounds);
+  a.reactionVolume = clampInt(a.reactionVolume, 0, 100, d.audio.reactionVolume);
 
   const n = c.network;
   n.iceServers = sanitizeIceServers(n.iceServers);

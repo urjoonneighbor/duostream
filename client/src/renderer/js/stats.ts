@@ -66,9 +66,17 @@ const codecName = (byId: Map<string, Stat>, id: string): string | null => byId.g
 export class StatsMonitor {
   private readonly session: PeerSession;
   private prev = new Map<string, Stat>();
+  private recent: Quality[] = []; // оценки последних замеров — для цвета индикатора
 
   constructor(session: PeerSession) {
     this.session = session;
+  }
+
+  private smooth(quality: Quality): Quality {
+    this.recent.push(quality);
+    if (this.recent.length > QUALITY_WINDOW) this.recent.shift();
+    if (quality === 'unknown') return quality;
+    return secondWorst(this.recent.filter((q) => q !== 'unknown'));
   }
 
   async sample(): Promise<StatsSample> {
@@ -189,11 +197,24 @@ export class StatsMonitor {
     }
 
     result.lossPct = result.video?.lossPct ?? result.audio.inLossPct;
-    result.quality = evaluate(result);
+    result.quality = this.smooth(evaluate(result));
 
     this.prev = byId;
     return result;
   }
+}
+
+/**
+ * Цвет индикатора — по последним 5 замерам (≈5 с): вторая худшая оценка. Замер — за 1 с, а за секунду
+ * приходит лишь несколько десятков пакетов: одного потерянного хватает на «потери ≥ 1 %», и индикатор мигал
+ * жёлтым от каждого одиночного всплеска. Теперь одиночный всплеск не виден, а то, что держится 2 с из 5, — сразу.
+ */
+const QUALITY_RANK: Record<Quality, number> = { unknown: 0, good: 1, fair: 2, poor: 3 };
+const QUALITY_WINDOW = 5;
+
+function secondWorst(list: Quality[]): Quality {
+  const sorted = [...list].sort((a, b) => QUALITY_RANK[b] - QUALITY_RANK[a]);
+  return sorted[Math.min(1, sorted.length - 1)];
 }
 
 function evaluate(s: StatsSample): Quality {

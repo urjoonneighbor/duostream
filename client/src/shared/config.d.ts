@@ -68,6 +68,10 @@ export interface Config {
     pushToTalk: boolean;
     pushToTalkReleaseMs: number;
     uiSounds: boolean;
+    /** Звук реакций со звуком: вкл/выкл */
+    reactionSounds: boolean;
+    /** Громкость звука реакций, 0..100 */
+    reactionVolume: number;
   };
   hotkeys: Record<HotkeyAction, HotkeyBinding | null>;
   network: {

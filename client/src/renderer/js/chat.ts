@@ -29,8 +29,17 @@ const IMAGE_TYPES: Record<string, string> = {
 };
 
 import { Emitter } from './events.ts';
+import { AvatarSync } from './avatar-sync.ts';
+import { ReactionSync } from './reaction-sync.ts';
+import { RateWindow, REACTIONS_PER_PERSON, isReactionKey } from './reactions.ts';
 import type { PeerSession } from './peer.ts';
 import type { LinkPreview } from '../../shared/duo-api';
+
+/** Кто поставил реакцию: участников двое, счётчик — 1 или 2 */
+export interface ReactionMarks {
+  me: boolean;
+  peer: boolean;
+}
 
 export type TransferStatus = 'offered' | 'sending' | 'finishing' | 'receiving' | 'done' | 'rejected' | 'cancelled' | 'error';
 
@@ -43,6 +52,8 @@ export interface MessageItem {
   pending?: boolean;
   /** Карточка первой ссылки в тексте */
   preview?: LinkPreview;
+  /** Реакции: ключ → кто поставил, в порядке появления */
+  reactions?: Map<string, ReactionMarks>;
 }
 
 /** Передача файла — входящая или исходящая */
@@ -57,12 +68,16 @@ export interface Transfer {
   pending?: boolean;
   sent: number;
   received: number;
+  /** Реакции: ключ → кто поставил, в порядке появления */
+  reactions?: Map<string, ReactionMarks>;
   /** Скорость, байт/с */
   speed: number;
   speedMark: { at: number; bytes: number };
   error?: string;
   /** Миниатюра картинки (blob:) */
   preview?: string | null;
+  /** Под спойлером: миниатюра скрыта, пока по ней не щёлкнут */
+  spoiler?: boolean;
   /** Входящая картинка: её MIME и то, что её приняли без «Принять» */
   imageType?: string | null;
   auto?: boolean;
@@ -83,13 +98,22 @@ export type ChatItem = MessageItem | Transfer;
 type Control =
   | { t: 'msg'; id: number; text: string; ts: number }
   | { t: 'msg-preview'; id: number; preview: unknown }
-  | { t: 'file-offer'; id: number; name: string; size: number }
+  | { t: 'reaction'; id: number; key: string; on: boolean }
+  | { t: 'file-offer'; id: number; name: string; size: number; spoiler?: boolean }
   | { t: 'file-accept'; id: number; offset: number }
   | { t: 'file-reject'; id: number }
   | { t: 'file-cancel'; id: number }
   | { t: 'file-received'; id: number };
 
 type Channels = { chat: RTCDataChannel; file: RTCDataChannel };
+
+/** Спойлер в тексте: ||скрытое|| (как в Discord); может занимать несколько строк */
+export const SPOILER_PATTERN = /\|\|([\s\S]+?)\|\|/g;
+
+/** Текст без содержимого спойлеров — для уведомлений, оверлея и карточки ссылки */
+export function hideSpoilers(text: string): string {
+  return text.replace(SPOILER_PATTERN, '▒▒▒');
+}
 
 /** Ссылки в тексте сообщения (без завершающих знаков препинания) */
 export const URL_PATTERN = /\bhttps?:\/\/[^\s<>"'«»]+[^\s<>"'«».,;:!?)\]}]/gi;
@@ -119,13 +143,39 @@ function previewType(name: string, size: number): string | null {
   return size > 0 && size <= PREVIEW_MAX ? (IMAGE_TYPES[ext] ?? null) : null;
 }
 
-export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
+const STREAM_REACTIONS_PER_SECOND = 5;
+const PEER_REACTIONS = 40; // реакций на сообщения за PEER_REACTIONS_MS; что не вошло при сбросе очереди, догонит reaction-state
+const PEER_REACTIONS_MS = 5000;
+const PEER_REACTION_STATES = 6; // сводок за PEER_REACTIONS_MS: честный собеседник шлёт одну на каждое открытие каналов
+const REACTION_STATE_ITEMS = 200; // сообщений в сводке: она не больше 256 КБ — предела сообщения канала
+
+export interface ChatEvents {
+  change: { item: ChatItem | null };
+  /**
+   * Реакцию на сообщение поставили или сняли.
+   * silent — состояние догнали при новом открытии каналов: без звука, анимации и уведомления
+   */
+  reaction: { item: ChatItem; key: string; who: 'me' | 'peer'; on: boolean; silent: boolean };
+  'stream-reaction': { key: string; who: 'me' | 'peer' };
+}
+
+export class Chat extends Emitter<ChatEvents> {
   /** Сообщения и передачи по порядку */
   readonly items: ChatItem[] = [];
   private readonly transfers = new Map<number, Transfer>(); // входящие и исходящие
   private outbox: Control[] = []; // сообщения, набранные без связи
   private channels: Channels | null = null; // когда оба открыты
   session: PeerSession | null = null;
+  /** Аватарки ходят по этому же каналу (js/avatar-sync.ts) */
+  readonly avatars = new AvatarSync();
+  /** Свои реакции ходят по этому же каналу (js/reaction-sync.ts) */
+  readonly reactions = new ReactionSync();
+  /** Сообщения, на которых мы меняли реакции: их итог уходит сводкой при открытии каналов; порядок — от давних к свежим */
+  private readonly reactedItems = new Set<number>();
+  private readonly peerReactionRate = new RateWindow(PEER_REACTIONS, PEER_REACTIONS_MS);
+  private readonly peerReactionStateRate = new RateWindow(PEER_REACTION_STATES, PEER_REACTIONS_MS);
+  private readonly peerStreamRate = new RateWindow(STREAM_REACTIONS_PER_SECOND, 1000);
+  private readonly ownStreamRate = new RateWindow(STREAM_REACTIONS_PER_SECOND, 1000);
 
   get connected(): boolean {
     return Boolean(this.channels);
@@ -161,11 +211,17 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
     const was = this.connected;
     this.session = null;
     this.channels = null;
+    this.avatars.close();
+    this.reactions.close();
     if (was) this.changed();
   }
 
   private onOpen(): void {
-    for (const msg of this.outbox.splice(0)) this.sendControl(msg);
+    this.avatars.open(this.channels!.chat);
+    this.reactions.open(this.channels!.chat);
+    // Реакции — после сообщений и предложений файлов: иначе они придут к ещё не существующему id
+    const queued = this.outbox.splice(0);
+    for (const msg of queued) if (msg.t !== 'reaction' && !this.sendControl(msg)) this.outbox.push(msg);
     for (const item of this.items) if (item.pending) item.pending = false;
     for (const t of this.transfers.values()) {
       // Возобновление: получатель сообщает, сколько уже записал
@@ -173,14 +229,55 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
       // Подтверждение могло потеряться при обрыве — повторяем, иначе отправитель ждёт его вечно
       if (!t.mine && t.status === 'done') this.sendControl({ t: 'file-received', id: t.id });
       // Предложение файла, которое собеседник мог не получить
-      if (t.mine && t.status === 'offered') this.sendControl({ t: 'file-offer', id: t.id, name: t.name, size: t.size });
+      if (t.mine && t.status === 'offered') this.sendControl({ t: 'file-offer', id: t.id, name: t.name, size: t.size, spoiler: t.spoiler });
     }
+    // Снятия раньше постановок: иначе у собеседника новая реакция упрётся в предел, который освободится следующим сообщением
+    for (const on of [false, true]) for (const msg of queued) if (msg.t === 'reaction' && msg.on === on && !this.sendControl(msg)) this.outbox.push(msg);
+    this.sendReactionState();
+    this.requestMissingReactions();
     this.changed();
   }
 
+  /**
+   * Сводка своих реакций: подтверждений нет, и всё, что лежало в очереди умершего канала или не прошло пределы
+   * получателя, иначе разошлось бы до конца чата. Получатель сверяет её с тем, что у него есть
+   */
+  private sendReactionState(): void {
+    const channels = this.channels;
+    if (!channels || !this.reactedItems.size || channels.chat.readyState !== 'open') return;
+    const byId = new Map(this.items.map((item) => [item.id, item]));
+    const items: { id: number; keys: string[] }[] = [];
+    for (const id of this.reactedItems) {
+      const item = byId.get(id);
+      if (!item) continue;
+      const keys = [...(item.reactions ?? [])].filter(([, marks]) => marks.me).map(([key]) => key);
+      for (const key of keys) this.reactions.announce(key);
+      items.push({ id, keys });
+    }
+    if (!items.length) return;
+    try {
+      channels.chat.send(JSON.stringify({ t: 'reaction-state', items }));
+    } catch {
+      // канал закрывается — сводка уйдёт на следующем
+    }
+  }
+
+  /** Файлы реакций из истории, которые не дошли: новые сообщения — первыми, в очереди не всё поместится */
+  private requestMissingReactions(): void {
+    const keys = new Set<string>();
+    for (let i = this.items.length - 1; i >= 0; i--) for (const key of this.items[i].reactions?.keys() ?? []) keys.add(key);
+    this.reactions.requestMissing(keys);
+  }
+
   private sendControl(msg: Control): boolean {
-    if (!this.channels) return false;
-    this.channels.chat.send(JSON.stringify(msg));
+    // Канал мог начать закрываться раньше, чем пришёл onclose: send в этом состоянии бросает
+    if (!this.channels || this.channels.chat.readyState !== 'open') return false;
+    if (msg.t === 'reaction') this.reactions.announce(msg.key); // описание своей реакции — раньше неё
+    try {
+      this.channels.chat.send(JSON.stringify(msg));
+    } catch {
+      return false;
+    }
     return true;
   }
 
@@ -202,7 +299,7 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
    * уходит готовая карточка — у него ничего не загружается
    */
   private async attachPreview(item: MessageItem): Promise<void> {
-    const url = item.text.match(URL_PATTERN)?.[0];
+    const url = hideSpoilers(item.text).match(URL_PATTERN)?.[0]; // ссылка под спойлером карточкой не раскрывается
     if (!url) return;
     const preview = sanitizePreview(await window.duo.linkPreview(url).catch(() => null));
     if (!preview) return;
@@ -213,12 +310,24 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
   }
 
   private onControl(raw: unknown): void {
-    let msg: Control;
+    let parsed: unknown;
     try {
-      msg = JSON.parse(String(raw)) as Control;
+      parsed = JSON.parse(String(raw));
     } catch {
       return;
     }
+    if (!parsed || typeof parsed !== 'object') return;
+    const record = parsed as Record<string, unknown>;
+    if (this.avatars.handle(record) || this.reactions.handle(record)) return;
+    if (record.t === 'reaction-stream') {
+      if (isReactionKey(record.key) && this.peerStreamRate.allow()) this.emit('stream-reaction', { key: record.key, who: 'peer' });
+      return;
+    }
+    if (record.t === 'reaction-state') {
+      this.onPeerReactionState(record.items);
+      return;
+    }
+    const msg = parsed as Control;
     const t = this.transfers.get(msg.id);
     switch (msg.t) {
       case 'msg': {
@@ -236,13 +345,16 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
         }
         break;
       }
+      case 'reaction':
+        this.onPeerReaction(msg);
+        break;
       case 'file-offer':
         if (t) return; // повторное предложение после переподключения
         {
           const name = String(msg.name ?? 'файл');
           const size = Number(msg.size) || 0;
           const imageType = previewType(name, size);
-          this.addTransfer({ id: msg.id, mine: false, name, size, status: 'offered', imageType, auto: Boolean(imageType) });
+          this.addTransfer({ id: msg.id, mine: false, name, size, status: 'offered', imageType, auto: Boolean(imageType), spoiler: msg.spoiler === true });
           if (imageType) void this.accept(msg.id); // картинку принимаем сразу — её покажем в чате
         }
         break;
@@ -263,13 +375,81 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
     }
   }
 
+  // ---------------- реакции ----------------
+
+  private countReactions(item: ChatItem, who: 'me' | 'peer'): number {
+    let count = 0;
+    for (const marks of item.reactions?.values() ?? []) if (marks[who]) count++;
+    return count;
+  }
+
+  private applyReaction(item: ChatItem, key: string, who: 'me' | 'peer', on: boolean, silent = false): void {
+    item.reactions ??= new Map();
+    const marks = item.reactions.get(key) ?? { me: false, peer: false };
+    marks[who] = on;
+    if (marks.me || marks.peer) item.reactions.set(key, marks);
+    else item.reactions.delete(key);
+    this.emit('reaction', { item, key, who, on, silent });
+  }
+
+  /** Поставить или снять свою реакцию; false — у человека уже предел реакций на это сообщение */
+  toggleReaction(id: number, key: string): boolean {
+    const item = this.items.find((i) => i.id === id);
+    if (!item || !isReactionKey(key)) return true;
+    const on = !item.reactions?.get(key)?.me;
+    if (on && this.countReactions(item, 'me') >= REACTIONS_PER_PERSON) return false;
+    this.applyReaction(item, key, 'me', on);
+    const msg: Control = { t: 'reaction', id, key, on };
+    this.reactedItems.delete(id);
+    this.reactedItems.add(id); // самое свежее — в конец
+    if (this.reactedItems.size > REACTION_STATE_ITEMS) this.reactedItems.delete(this.reactedItems.values().next().value!);
+    // Запись в очереди значит, что собеседник ещё видит прежнее состояние: обратное действие их взаимно отменяет
+    const queued = this.outbox.findIndex((m) => m.t === 'reaction' && m.id === id && m.key === key);
+    if (queued >= 0) this.outbox.splice(queued, 1);
+    else if (!this.sendControl(msg)) this.outbox.push(msg);
+    return true;
+  }
+
+  /** От собеседника: только к существующему сообщению, ключ из набора или формата hash, в пределах частоты и числа */
+  private onPeerReaction(msg: { id: unknown; key: unknown; on: unknown }): void {
+    if (typeof msg.id !== 'number' || typeof msg.on !== 'boolean' || !isReactionKey(msg.key) || !this.peerReactionRate.allow()) return;
+    const item = this.items.find((i) => i.id === msg.id);
+    if (!item || Boolean(item.reactions?.get(msg.key)?.peer) === msg.on) return;
+    if (msg.on && this.countReactions(item, 'peer') >= REACTIONS_PER_PERSON) return;
+    this.applyReaction(item, msg.key, 'peer', msg.on);
+  }
+
+  /** Сводка от собеседника: те же проверки, только расходящееся применяется, снятия — раньше постановок */
+  private onPeerReactionState(raw: unknown): void {
+    if (!Array.isArray(raw) || raw.length > REACTION_STATE_ITEMS || !this.peerReactionStateRate.allow()) return;
+    const byId = new Map(this.items.map((item) => [item.id, item]));
+    for (const entry of raw as unknown[]) {
+      const { id, keys } = (entry ?? {}) as { id?: unknown; keys?: unknown };
+      const item = typeof id === 'number' ? byId.get(id) : undefined;
+      if (!item || !Array.isArray(keys) || keys.length > REACTIONS_PER_PERSON || !keys.every(isReactionKey)) continue;
+      const wanted = new Set<string>(keys);
+      for (const [key, marks] of [...(item.reactions ?? [])]) if (marks.peer && !wanted.has(key)) this.applyReaction(item, key, 'peer', false, true);
+      for (const key of wanted) if (!item.reactions?.get(key)?.peer) this.applyReaction(item, key, 'peer', true, true);
+    }
+  }
+
+  /** Реакция на трансляцию: живёт несколько секунд, поэтому без связи не копится */
+  sendStreamReaction(key: string): boolean {
+    if (!this.channels || this.channels.chat.readyState !== 'open' || !isReactionKey(key) || !this.ownStreamRate.allow()) return false;
+    this.reactions.announce(key);
+    this.channels.chat.send(JSON.stringify({ t: 'reaction-stream', key }));
+    this.emit('stream-reaction', { key, who: 'me' });
+    return true;
+  }
+
   // ---------------- файлы: отправка ----------------
 
-  sendFiles(files: Iterable<File>): void {
+  /** @param spoiler картинка у обоих скрыта, пока по ней не щёлкнут */
+  sendFiles(files: Iterable<File>, { spoiler = false } = {}): void {
     for (const file of files) {
       const preview = previewType(file.name, file.size) ? URL.createObjectURL(file) : null;
-      const t = this.addTransfer({ id: randomId(), mine: true, name: file.name, size: file.size, status: 'offered', file, preview });
-      this.sendControl({ t: 'file-offer', id: t.id, name: t.name, size: t.size });
+      const t = this.addTransfer({ id: randomId(), mine: true, name: file.name, size: file.size, status: 'offered', file, preview, spoiler });
+      this.sendControl({ t: 'file-offer', id: t.id, name: t.name, size: t.size, spoiler });
     }
   }
 
@@ -431,6 +611,9 @@ export class Chat extends Emitter<{ change: { item: ChatItem | null } }> {
       if (['offered', 'sending', 'finishing', 'receiving'].includes(t.status)) this.finishCancelled(t, 'соединение закрыто');
     }
     this.outbox = [];
+    this.reactedItems.clear();
+    this.avatars.resetPeer();
+    this.reactions.resetPeer();
     this.detach();
   }
 
